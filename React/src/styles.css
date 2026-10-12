@@ -1,0 +1,190 @@
+/* 🌟 1. تعريف خط Cairo محلياً وأوفلاين من داخل فولدر src/fonts */
+@font-face {
+  font-family: "Cairo";
+  src: url("./fonts/Cairo-Regular.ttf") format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: "Cairo";
+  src: url("./fonts/Cairo-Bold.ttf") format("truetype");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* 🌟 بقية كود Tailwind v4 الافتراضي بتاعك */
+@import "tailwindcss";
+@source "../src";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-card: var(--card);
+  --color-card-foreground: var(--card-foreground);
+  --color-popover: var(--popover);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-secondary: var(--secondary);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-muted: var(--muted);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-accent: var(--accent);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-destructive: var(--destructive);
+  --color-destructive-foreground: var(--destructive-foreground);
+  --color-border: var(--border);
+  --color-input: var(--input);
+  --color-ring: var(--ring);
+  --color-success: var(--success);
+  --color-success-foreground: var(--success-foreground);
+  --color-warning: var(--warning);
+  --color-warning-foreground: var(--warning-foreground);
+
+  /* الخط الافتراضي هنا قاري Cairo كأول خيار وممتاز جداً */
+  --font-sans: "Cairo", "Tajawal", system-ui, sans-serif;
+}
+
+:root {
+  --radius: 0.625rem;
+  --background: oklch(0.99 0.005 95);
+  --foreground: oklch(0.18 0.02 250);
+  --card: oklch(1 0 0);
+  --card-foreground: oklch(0.18 0.02 250);
+  --popover: oklch(1 0 0);
+  --popover-foreground: oklch(0.18 0.02 250);
+  --primary: oklch(0.45 0.14 165);
+  --primary-foreground: oklch(0.99 0.005 95);
+  --secondary: oklch(0.95 0.01 165);
+  --secondary-foreground: oklch(0.25 0.05 165);
+  --muted: oklch(0.96 0.005 250);
+  --muted-foreground: oklch(0.5 0.02 250);
+  --accent: oklch(0.93 0.04 80);
+  --accent-foreground: oklch(0.25 0.05 80);
+  --destructive: oklch(0.58 0.22 27);
+  --destructive-foreground: oklch(0.99 0.005 95);
+  --success: oklch(0.6 0.15 155);
+  --success-foreground: oklch(0.99 0.005 95);
+  --warning: oklch(0.75 0.16 75);
+  --warning-foreground: oklch(0.2 0.05 75);
+  --border: oklch(0.9 0.01 250);
+  --input: oklch(0.9 0.01 250);
+  --ring: oklch(0.45 0.14 165);
+}
+
+.dark {
+  --background: oklch(0.15 0.02 250);
+  --foreground: oklch(0.98 0.005 95);
+  --card: oklch(0.2 0.02 250);
+  --card-foreground: oklch(0.98 0.005 95);
+  --popover: oklch(0.2 0.02 250);
+  --popover-foreground: oklch(0.98 0.005 95);
+  --primary: oklch(0.7 0.14 165);
+  --primary-foreground: oklch(0.15 0.02 250);
+  --secondary: oklch(0.28 0.03 250);
+  --secondary-foreground: oklch(0.98 0.005 95);
+  --muted: oklch(0.28 0.02 250);
+  --muted-foreground: oklch(0.7 0.02 250);
+  --accent: oklch(0.32 0.04 80);
+  --accent-foreground: oklch(0.98 0.005 95);
+  --destructive: oklch(0.65 0.22 27);
+  --destructive-foreground: oklch(0.98 0.005 95);
+  --border: oklch(1 0 0 / 12%);
+  --input: oklch(1 0 0 / 15%);
+  --ring: oklch(0.7 0.14 165);
+}
+
+@layer base {
+  * {
+    border-color: var(--color-border);
+  }
+  html {
+    font-family: var(--font-sans);
+  }
+  body {
+    background-color: var(--color-background);
+    color: var(--color-foreground);
+    font-family: var(--font-sans);
+  }
+}
+
+/* A4 Print Styles */
+@media print {
+  @page {
+    size: 75mm;
+    margin: 10mm;
+  }
+
+  body {
+    background: white !important;
+    color: black !important;
+    font-size: 10pt;
+  }
+
+  .no-print,
+  nav,
+  header,
+  button,
+  input,
+  select,
+  textarea,
+  .print\\:hidden {
+    display: none !important;
+  }
+
+  .print-area,
+  .print-area * {
+    visibility: visible;
+  }
+  .print-area {
+    position: absolute;
+    inset: 0;
+    width: 100%;
+    background: white !important;
+    color: black !important;
+    padding: 0 !important;
+    margin: 0 !important;
+  }
+
+  table.print-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 9pt;
+  }
+  table.print-table th,
+  table.print-table td {
+    border: 1px solid #333;
+    padding: 2px 4px;
+    text-align: right;
+    line-height: 1.2;
+  }
+  table.print-table thead {
+    background: #eee !important;
+    -webkit-print-color-adjust: exact;
+  }
+
+  .print-voucher {
+    page-break-inside: avoid;
+    margin-bottom: 8mm;
+  }
+  .print-voucher + .print-voucher {
+    page-break-before: auto;
+  }
+
+  h1,
+  h2,
+  h3 {
+    color: black !important;
+    margin: 4px 0;
+  }
+}
