@@ -15,13 +15,11 @@ import {
   X,
 } from "lucide-react";
 import SearchSelect from "../components/SearchSelect";
-import type { Device } from "../types/device";
 import type { WarehouseBatch } from "../types/warehouse";
 import type { CartItem, Installment, Method, Sale } from "../types/sales";
 
 export const Route = createFileRoute("/sales")({ component: SalesPage });
 
-const DEVICES_KEY = "mobile-system-devices-v1";
 const SALES_KEY = "mobile-system-sales-v1";
 const WAREHOUSE_KEY = "mobile-system-warehouse-v1";
 
@@ -109,55 +107,15 @@ function sameText(a: string | undefined, b: string | undefined) {
   );
 }
 
-// IMEIs stored on a batch represent units that must be sold by their exact serial.
-// A blank-IMEI sale may only consume stock that has no remaining registered IMEI.
-function trackedImeisInBatch(batch: WarehouseBatch, devices: Device[]) {
-  const soldImeis = new Set(
-    devices
-      .filter(
-        (device) =>
-          device.status === "sold" && String(device.imei ?? "").trim(),
-      )
-      .map((device) => String(device.imei).trim().toLocaleLowerCase()),
-  );
-  const uniqueImeis = new Set(
-    (Array.isArray(batch.imeis) ? batch.imeis : [])
-      .map((imei) =>
-        String(imei ?? "")
-          .trim()
-          .toLocaleLowerCase(),
-      )
-      .filter(Boolean),
-  );
-  return [...uniqueImeis].filter((imei) => !soldImeis.has(imei)).length;
-}
-
-function untrackedAvailableInBatch(
-  batch: WarehouseBatch,
-  devices: Device[],
-  cart: CartItem[],
-) {
-  const alreadyAddedWithoutImei = cart.filter(
-    (item) => item.warehouseBatchId === batch.id && !item.imei.trim(),
-  ).length;
-  return Math.max(
-    0,
-    (Number(batch.availableQuantity) || 0) -
-      trackedImeisInBatch(batch, devices) -
-      alreadyAddedWithoutImei,
-  );
-}
-
 function SalesPage() {
   const [ready, setReady] = useState(false);
-  const [devices, setDevices] = useState<Device[]>([]);
   const [batches, setBatches] = useState<WarehouseBatch[]>([]);
   const [sales, setSales] = useState<Sale[]>([]);
   const [showAddForm, setShowAddForm] = useState(false);
   const [brand, setBrand] = useState("");
   const [series, setSeries] = useState("");
   const [model, setModel] = useState("");
-  const [imeiInput, setImeiInput] = useState("");
+  const [quantityInput, setQuantityInput] = useState("1");
   const [selectedBatchId, setSelectedBatchId] = useState("");
   const [cart, setCart] = useState<CartItem[]>([]);
   const [customerName, setCustomerName] = useState("");
@@ -170,7 +128,6 @@ function SalesPage() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    setDevices(readArray<Device>(DEVICES_KEY));
     setBatches(readArray<WarehouseBatch>(WAREHOUSE_KEY));
     setSales(readArray<Sale>(SALES_KEY));
     setReady(true);
@@ -212,25 +169,13 @@ function SalesPage() {
     activeBatches.forEach((batch) =>
       add(batch.brand, batch.series, batch.model),
     );
-    // Keep legacy, individually registered devices sellable even if they predate warehouse linking.
-    devices
-      .filter((device) => device.status === "available" && device.imei?.trim())
-      .forEach((device) => {
-        const hasMatchingBatch = activeBatches.some(
-          (batch) =>
-            sameText(batch.brand, device.brand) &&
-            sameText(batch.series || "عام", device.series || "عام") &&
-            sameText(batch.model, device.model),
-        );
-        if (!hasMatchingBatch)
-          add(device.brand, device.series || "عام", device.model);
-      });
+
     return entries.sort((a, b) =>
       `${a.brand} ${a.series} ${a.model}`.localeCompare(
         `${b.brand} ${b.series} ${b.model}`,
       ),
     );
-  }, [activeBatches, devices]);
+  }, [activeBatches]);
 
   const brands = useMemo(
     () =>
@@ -284,29 +229,14 @@ function SalesPage() {
     [batches, brand, model, series],
   );
 
-  const availableCount = useMemo(() => {
-    const batchQty = batches.reduce(
-      (sum, batch) => sum + Math.max(0, Number(batch.availableQuantity) || 0),
-      0,
-    );
-    const legacyQty = devices.filter((device) => {
-      if (device.status !== "available" || !device.imei?.trim()) return false;
-      if (
-        device.warehouseBatchId &&
-        batches.some((batch) => batch.id === device.warehouseBatchId)
-      )
-        return false;
-      const hasStockBatch = batches.some(
-        (batch) =>
-          Number(batch.availableQuantity) > 0 &&
-          sameText(batch.brand, device.brand) &&
-          sameText(batch.series || "عام", device.series || "عام") &&
-          sameText(batch.model, device.model),
-      );
-      return !hasStockBatch;
-    }).length;
-    return batchQty + legacyQty;
-  }, [batches, devices]);
+  const availableCount = useMemo(
+    () =>
+      batches.reduce(
+        (sum, batch) => sum + Math.max(0, Number(batch.availableQuantity) || 0),
+        0,
+      ),
+    [batches],
+  );
 
   const cartTotal = useMemo(
     () =>
@@ -315,7 +245,8 @@ function SalesPage() {
           sum +
           (method === "installment"
             ? item.installmentFinalPrice
-            : item.cashFinalPrice),
+            : item.cashFinalPrice) *
+            Math.max(1, Number(item.quantity) || 1),
         0,
       ),
     [cart, method],
@@ -356,7 +287,7 @@ function SalesPage() {
     setBrand("");
     setSeries("");
     setModel("");
-    setImeiInput("");
+    setQuantityInput("1");
     setSelectedBatchId("");
   }
 
@@ -454,213 +385,92 @@ function SalesPage() {
 
   function addDeviceToCart(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const cleanImei = imeiInput.trim();
+
+    const requestedQuantity = Number(quantityInput);
+
+    if (!Number.isInteger(requestedQuantity) || requestedQuantity < 1) {
+      notify("الكمية لازم تكون عددًا صحيحًا أكبر من صفر.");
+      return;
+    }
+
     if (!brand.trim() || !model.trim()) {
       notify("اختار الماركة والموديل أولًا.");
       return;
     }
 
-    const imeiKey = cleanImei.toLocaleLowerCase();
-    if (
-      cleanImei &&
-      cart.some((item) => item.imei.trim().toLocaleLowerCase() === imeiKey)
-    ) {
-      notify("رقم IMEI ده موجود بالفعل في الفاتورة.");
-      return;
-    }
-
-    const currentDevices = readArray<Device>(DEVICES_KEY);
-    const matchingDevices = cleanImei
-      ? currentDevices.filter(
-          (device) =>
-            String(device.imei ?? "")
-              .trim()
-              .toLocaleLowerCase() === imeiKey,
-        )
-      : [];
-    if (matchingDevices.length > 1) {
-      notify("رقم IMEI مكرر في سجلات الأجهزة؛ صحّح التكرار قبل البيع.");
-      return;
-    }
-    const existingDevice = matchingDevices[0];
-    if (existingDevice && existingDevice.status !== "available") {
-      notify(
-        existingDevice.status === "sold"
-          ? "الجهاز ده اتباع بالفعل."
-          : "الجهاز محجوز حاليًا ومش متاح للبيع.",
-      );
-      return;
-    }
-    if (
-      existingDevice &&
-      (!sameText(existingDevice.brand, brand) ||
-        !sameText(existingDevice.model, model) ||
-        (series && !sameText(existingDevice.series || "عام", series)))
-    ) {
-      notify(
-        `رقم IMEI مسجل على ${existingDevice.brand} ${existingDevice.model}، وليس الموديل المختار.`,
-      );
-      return;
-    }
-
     const allCurrentBatches = readArray<WarehouseBatch>(WAREHOUSE_KEY);
-    const typedBatch = selectedBatchId
-      ? allCurrentBatches.find((batch) => batch.id === selectedBatchId)
-      : undefined;
-    const imeiBatch = cleanImei
-      ? allCurrentBatches.find(
-          (batch) =>
-            Array.isArray(batch.imeis) &&
-            batch.imeis.some(
-              (value) => value.trim().toLocaleLowerCase() === imeiKey,
-            ),
-        )
-      : undefined;
-    if (
-      imeiBatch &&
-      (!sameText(imeiBatch.brand, brand) ||
-        !sameText(imeiBatch.model, model) ||
-        (series && !sameText(imeiBatch.series || "عام", series)))
-    ) {
-      notify(
-        `رقم IMEI ده مسجل ضمن شحنة ${imeiBatch.brand} ${imeiBatch.model}، راجع اختيار الموديل.`,
-      );
-      return;
-    }
 
-    let chosenBatch: WarehouseBatch | undefined;
-    if (existingDevice?.warehouseBatchId) {
-      chosenBatch = allCurrentBatches.find(
-        (batch) => batch.id === existingDevice.warehouseBatchId,
-      );
-    }
-    if (!chosenBatch && imeiBatch) chosenBatch = imeiBatch;
-    if (!chosenBatch && typedBatch) chosenBatch = typedBatch;
-
-    if (
-      chosenBatch &&
-      (!sameText(chosenBatch.brand, brand) ||
-        !sameText(chosenBatch.model, model) ||
-        (series && !sameText(chosenBatch.series || "عام", series)))
-    ) {
-      notify("الشحنة المختارة لا تطابق الماركة والموديل المحددين.");
-      return;
-    }
-
-    const cartCounts = new Map<string, number>();
-    cart.forEach((item) => {
-      if (item.warehouseBatchId)
-        cartCounts.set(
-          item.warehouseBatchId,
-          (cartCounts.get(item.warehouseBatchId) || 0) + 1,
-        );
-    });
-    const currentAvailable = (batch: WarehouseBatch) =>
-      Math.max(0, Number(batch.availableQuantity) || 0) -
-      (cartCounts.get(batch.id) || 0);
-
-    // Automatically assign the oldest batch only for stock-based sales. Existing
-    // legacy devices without a batch must not accidentally deduct a second unit.
-    if (!chosenBatch && !existingDevice) {
-      const candidates = allCurrentBatches
-        .filter(
-          (batch) =>
-            sameText(batch.brand, brand) &&
-            sameText(batch.model, model) &&
-            (!series || sameText(batch.series || "عام", series)) &&
-            (cleanImei
-              ? currentAvailable(batch) > 0
-              : untrackedAvailableInBatch(batch, currentDevices, cart) > 0),
-        )
-        .sort((a, b) => Number(a.receivedAt) - Number(b.receivedAt));
-      chosenBatch = candidates[0]; // FIFO: oldest eligible batch first.
-    }
-
-    if (!existingDevice && !chosenBatch) {
-      notify(
-        cleanImei
-          ? "مفيش رصيد متاح للموديل ده في المخزن. راجع الشحنة أو الكمية المتاحة."
-          : "مفيش وحدات متاحة من غير IMEI للموديل ده. اختار شحنة فيها وحدات غير مسجلة بالرقم أو أدخل IMEI للجهاز.",
-      );
-      return;
-    }
-    if (chosenBatch && currentAvailable(chosenBatch) <= 0) {
-      notify(
-        "الشحنة المختارة نفد رصيدها أو اتضافت كل وحداتها للسلة. اختار شحنة أخرى.",
-      );
-      return;
-    }
-    if (
-      chosenBatch &&
-      !cleanImei &&
-      untrackedAvailableInBatch(chosenBatch, currentDevices, cart) <= 0
-    ) {
-      notify(
-        "الوحدات المتاحة في الشحنة دي مسجلة بأرقام IMEI؛ أدخل رقم الجهاز أو اختار شحنة فيها وحدات غير مسجلة.",
-      );
-      return;
-    }
-
-    const duplicateInOtherBatch =
-      cleanImei &&
-      allCurrentBatches.some(
+    const matchingBatches = allCurrentBatches
+      .filter(
         (batch) =>
-          batch.id !== chosenBatch?.id &&
-          Array.isArray(batch.imeis) &&
-          batch.imeis.some(
-            (value) => value.trim().toLocaleLowerCase() === imeiKey,
-          ),
-      );
-    if (duplicateInOtherBatch) {
-      notify("رقم IMEI ده مسجل في شحنة مختلفة؛ اختار الشحنة الصحيحة.");
+          Number(batch.availableQuantity) > 0 &&
+          sameText(batch.brand, brand) &&
+          sameText(batch.model, model) &&
+          (!series || sameText(batch.series || "عام", series)),
+      )
+      .sort((a, b) => Number(a.receivedAt) - Number(b.receivedAt));
+
+    const chosenBatch =
+      matchingBatches.find((batch) => batch.id === selectedBatchId) ??
+      matchingBatches.find((batch) => !selectedBatchId);
+
+    if (!chosenBatch) {
+      notify("مفيش شحنة متاحة للموديل ده.");
       return;
     }
 
-    const fromBatch = chosenBatch;
-    const defaultPrice = Number(
-      fromBatch?.salePrice ?? existingDevice?.salePrice,
+    const alreadyInCart = cart
+      .filter((item) => item.warehouseBatchId === chosenBatch.id)
+      .reduce((sum, item) => sum + Math.max(1, Number(item.quantity) || 1), 0);
+
+    const available = Math.max(
+      0,
+      Number(chosenBatch.availableQuantity) - alreadyInCart,
     );
-    if (!Number.isFinite(defaultPrice) || defaultPrice < 0) {
+
+    if (requestedQuantity > available) {
       notify(
-        "سعر البيع غير محدد لهذا الجهاز أو الشحنة. حدّد سعر البيع في المخزن أولًا.",
+        `الكمية المطلوبة ${requestedQuantity}، والمتاح ${available} قطعة.`,
       );
       return;
     }
-    const installmentPrice = Number(
-      existingDevice?.installmentPrice ?? defaultPrice,
-    );
-    const deviceId = existingDevice?.id ?? makeId();
+
+    const defaultPrice = Number(chosenBatch.salePrice);
+
+    if (!Number.isFinite(defaultPrice) || defaultPrice <= 0) {
+      notify("سعر البيع غير محدد أو غير صحيح للشحنة.");
+      return;
+    }
+
     const item: CartItem = {
-      deviceId,
-      imei: cleanImei,
-      brand: fromBatch?.brand ?? existingDevice?.brand ?? brand,
-      series: fromBatch?.series ?? existingDevice?.series ?? series ?? "عام",
-      model: fromBatch?.model ?? existingDevice?.model ?? model,
-      color: existingDevice?.color ?? "",
-      ram: existingDevice?.ram ?? "",
-      storage: existingDevice?.storage ?? "",
+      deviceId: makeId(),
+      brand: chosenBatch.brand,
+      series: chosenBatch.series || "عام",
+      model: chosenBatch.model,
+      color: "",
+      ram: "",
+      storage: "",
       originalPrice: defaultPrice,
       cashPrice: defaultPrice,
-      installmentPrice,
+      installmentPrice: defaultPrice,
       cashFinalPrice: defaultPrice,
-      installmentFinalPrice: installmentPrice,
+      installmentFinalPrice: defaultPrice,
       finalPrice: defaultPrice,
       offerName: "",
-      ...(fromBatch
-        ? {
-            warehouseBatchId: fromBatch.id,
-            unitCost: Number(fromBatch.unitCost) || 0,
-          }
-        : {}),
-      ...(existingDevice ? {} : { isNewStock: true }),
+      quantity: requestedQuantity,
+      warehouseBatchId: chosenBatch.id,
+      unitCost: Number(chosenBatch.unitCost) || 0,
+      isNewStock: true,
     };
+
     setCart((current) => [...current, item]);
-    setDevices(currentDevices);
-    setImeiInput("");
+    setBatches(allCurrentBatches);
     setSelectedBatchId("");
     setShowAddForm(false);
+    setQuantityInput("1");
+
     notify(
-      `اتضاف ${item.brand} ${item.model} للفاتورة${cleanImei ? ` · IMEI: ${cleanImei}` : " · بدون IMEI"}${fromBatch ? ` — ${fromBatch.supplierName || "شحنة المخزن"}` : ""}.`,
+      `اتضاف ${numberText(requestedQuantity)} قطعة من ${item.brand} ${item.model} للفاتورة.`,
     );
   }
 
@@ -682,90 +492,49 @@ function SalesPage() {
 
   function submitSale(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+
     if (saving) return;
+
     if (!cart.length) {
-      notify("أضف جهازًا واحدًا على الأقل للفاتورة.");
+      notify("أضف قطعة واحدة على الأقل للفاتورة.");
       return;
     }
 
-    const currentDevices = readArray<Device>(DEVICES_KEY);
     const currentBatches = readArray<WarehouseBatch>(WAREHOUSE_KEY);
     const currentSales = readArray<Sale>(SALES_KEY);
-    const currentById = new Map(
-      currentDevices.map((device) => [device.id, device]),
-    );
-    const imeis = cart
-      .map((item) => item.imei.trim().toLocaleLowerCase())
-      .filter(Boolean);
-    if (new Set(imeis).size !== imeis.length) {
-      notify("يوجد IMEI مكرر في الفاتورة.");
-      return;
-    }
+
+    // التحقق من الكميات المطلوبة من كل شحنة
+    const batchCounts = new Map<string, number>();
 
     for (const item of cart) {
-      const current = currentById.get(item.deviceId);
-      if (current && current.status !== "available") {
-        setDevices(currentDevices);
-        notify(`الجهاز ${item.imei} لم يعد متاحًا للبيع.`);
+      if (!item.warehouseBatchId) {
+        notify("فيه عنصر في الفاتورة غير مرتبط بشحنة مخزون.");
         return;
       }
-      if (!current && !item.isNewStock) {
-        notify(
-          `تعذر العثور على سجل الجهاز ${item.imei}. احذفه من الفاتورة وأضفه مجددًا.`,
-        );
-        return;
-      }
-      if (item.imei.trim()) {
-        const matchingImei = currentDevices.find(
-          (device) =>
-            String(device.imei ?? "")
-              .trim()
-              .toLocaleLowerCase() === item.imei.trim().toLocaleLowerCase() &&
-            device.id !== item.deviceId,
-        );
-        if (matchingImei) {
-          notify(`رقم IMEI ${item.imei} مسجل بالفعل لجهاز آخر.`);
-          return;
-        }
-      }
-    }
 
-    const batchCounts = new Map<string, number>();
-    const anonymousBatchCounts = new Map<string, number>();
-    cart.forEach((item) => {
-      if (!item.warehouseBatchId) return;
+      const quantity = Number(item.quantity);
+
+      if (!Number.isInteger(quantity) || quantity < 1) {
+        notify("الكمية لازم تكون عددًا صحيحًا أكبر من صفر.");
+        return;
+      }
+
       batchCounts.set(
         item.warehouseBatchId,
-        (batchCounts.get(item.warehouseBatchId) || 0) + 1,
+        (batchCounts.get(item.warehouseBatchId) || 0) + quantity,
       );
-      if (!item.imei.trim())
-        anonymousBatchCounts.set(
-          item.warehouseBatchId,
-          (anonymousBatchCounts.get(item.warehouseBatchId) || 0) + 1,
-        );
-    });
+    }
+
     for (const [batchId, count] of batchCounts) {
       const batch = currentBatches.find((entry) => entry.id === batchId);
+
       if (!batch || Number(batch.availableQuantity) < count) {
-        notify(
-          "رصيد إحدى الشحنات اتغير ومبقاش يكفي الفاتورة. راجع الأجهزة وحاول تاني.",
-        );
-        return;
-      }
-      const anonymousCount = anonymousBatchCounts.get(batchId) || 0;
-      const untrackedCount = Math.max(
-        0,
-        Number(batch.availableQuantity) -
-          trackedImeisInBatch(batch, currentDevices),
-      );
-      if (anonymousCount > untrackedCount) {
-        notify(
-          "عدد الأجهزة المضافة بدون IMEI أكبر من الوحدات غير المسجلة المتاحة في إحدى الشحنات.",
-        );
+        notify("رصيد الشحنة لم يعد يكفي الكمية المطلوبة. راجع المخزون.");
         return;
       }
     }
 
+    // تثبيت سعر البيع حسب طريقة الدفع
     const finalItems = cart.map((item) => {
       const price =
         Math.round(
@@ -773,6 +542,7 @@ function SalesPage() {
             ? item.installmentFinalPrice
             : item.cashFinalPrice) * 100,
         ) / 100;
+
       return {
         ...item,
         originalPrice:
@@ -780,35 +550,49 @@ function SalesPage() {
         finalPrice: price,
       };
     });
+
     const total =
       Math.round(
-        finalItems.reduce((sum, item) => sum + item.finalPrice, 0) * 100,
+        finalItems.reduce(
+          (sum, item) =>
+            sum + item.finalPrice * Math.max(1, Number(item.quantity) || 1),
+          0,
+        ) * 100,
       ) / 100;
+
     const paid = method === "cash" ? total : Number(paidInput || 0);
+
     if (!Number.isFinite(paid) || paid < 0 || paid > total) {
       notify("راجع المبلغ المدفوع؛ لازم يكون بين صفر وإجمالي الفاتورة.");
       return;
     }
+
     if (method === "installment") {
       const count = Number(installmentCount);
+
       if (!Number.isInteger(count) || count < 1 || count > 120) {
         notify("عدد الأقساط لازم يكون بين 1 و120.");
         return;
       }
+
       if (total - paid <= 0 || installments.length !== count) {
         notify("لازم يكون فيه مبلغ متبقٍ لتسجيل التقسيط.");
         return;
       }
     }
+
     if (method === "credit" && total - paid <= 0) {
       notify("المتبقي صفر؛ اختار الكاش بدل الآجل.");
       return;
     }
+
     const phone = customerPhone.trim();
+
     if (phone && !/^[0-9+\-\s()]+$/.test(phone)) {
       notify("راجع رقم هاتف العميل.");
       return;
     }
+
     if (
       finalItems.some(
         (item) => !Number.isFinite(item.finalPrice) || item.finalPrice < 0,
@@ -820,6 +604,7 @@ function SalesPage() {
 
     const roundedPaid = Math.round(paid * 100) / 100;
     const roundedRemaining = Math.round((total - roundedPaid) * 100) / 100;
+
     const sale: Sale = {
       id: makeId(),
       invoiceNumber: invoiceNumber(),
@@ -838,95 +623,64 @@ function SalesPage() {
         roundedRemaining <= 0 ? "paid" : roundedPaid > 0 ? "partial" : "unpaid",
     };
 
-    const soldIds = new Set(finalItems.map((item) => item.deviceId));
-    const itemById = new Map(finalItems.map((item) => [item.deviceId, item]));
-    const nextDevices: Device[] = currentDevices.map((device) => {
-      if (!soldIds.has(device.id)) return device;
-      const item = itemById.get(device.id)!;
-      return {
-        ...device,
-        status: "sold",
-        warehouseBatchId: item.warehouseBatchId ?? device.warehouseBatchId,
-        unitCost: item.unitCost ?? device.unitCost,
-      };
-    });
-    for (const item of finalItems) {
-      if (currentById.has(item.deviceId)) continue;
-      nextDevices.push({
-        id: item.deviceId,
-        imei: item.imei,
-        brand: item.brand,
-        series: item.series,
-        model: item.model,
-        color: item.color,
-        ram: item.ram,
-        storage: item.storage,
-        salePrice: item.cashPrice,
-        installmentPrice: item.installmentPrice,
-        offer: null,
-        status: "sold",
-        createdAt: Date.now(),
-        ...(item.warehouseBatchId
-          ? { warehouseBatchId: item.warehouseBatchId }
-          : {}),
-        ...(item.unitCost !== undefined ? { unitCost: item.unitCost } : {}),
-      });
-    }
+    // حساب الكمية المباعة من كل شحنة
     const soldPerBatch = new Map<string, number>();
-    const soldImeisPerBatch = new Map<string, Set<string>>();
-    finalItems.forEach((item) => {
-      if (!item.warehouseBatchId) return;
+
+    for (const item of finalItems) {
+      if (!item.warehouseBatchId) continue;
+
+      const quantity = Math.max(1, Number(item.quantity) || 1);
+
       soldPerBatch.set(
         item.warehouseBatchId,
-        (soldPerBatch.get(item.warehouseBatchId) || 0) + 1,
+        (soldPerBatch.get(item.warehouseBatchId) || 0) + quantity,
       );
-      if (item.imei.trim()) {
-        if (!soldImeisPerBatch.has(item.warehouseBatchId))
-          soldImeisPerBatch.set(item.warehouseBatchId, new Set());
-        soldImeisPerBatch
-          .get(item.warehouseBatchId)!
-          .add(item.imei.trim().toLocaleLowerCase());
-      }
-    });
+    }
+
+    // خصم الكميات المباعة من المخزن
     const nextBatches = currentBatches.map((batch) => {
       const quantity = soldPerBatch.get(batch.id) || 0;
-      const soldImeis = soldImeisPerBatch.get(batch.id);
-      if (!quantity && !soldImeis?.size) return batch;
+
+      if (!quantity) return batch;
+
       return {
         ...batch,
-        availableQuantity: Math.max(
-          0,
-          Number(batch.availableQuantity) - quantity,
-        ),
-        imeis: (Array.isArray(batch.imeis) ? batch.imeis : []).filter(
-          (imei) => !soldImeis?.has(String(imei).trim().toLocaleLowerCase()),
-        ),
+        availableQuantity: Number(batch.availableQuantity) - quantity,
       };
     });
 
     setSaving(true);
+
     const oldValues = new Map<string, string | null>();
-    [SALES_KEY, DEVICES_KEY, WAREHOUSE_KEY].forEach((key) =>
-      oldValues.set(key, localStorage.getItem(key)),
-    );
+
+    [SALES_KEY, WAREHOUSE_KEY].forEach((key) => {
+      oldValues.set(key, localStorage.getItem(key));
+    });
+
     try {
       localStorage.setItem(SALES_KEY, JSON.stringify([sale, ...currentSales]));
-      localStorage.setItem(DEVICES_KEY, JSON.stringify(nextDevices));
+
       localStorage.setItem(WAREHOUSE_KEY, JSON.stringify(nextBatches));
+
       setSales([sale, ...currentSales]);
-      setDevices(nextDevices);
       setBatches(nextBatches);
+
       resetSale();
+
       notify(`تم تسجيل الفاتورة ${sale.invoiceNumber} وتحديث المخزن بنجاح.`);
     } catch {
       oldValues.forEach((value, key) => {
         try {
-          if (value === null) localStorage.removeItem(key);
-          else localStorage.setItem(key, value);
+          if (value === null) {
+            localStorage.removeItem(key);
+          } else {
+            localStorage.setItem(key, value);
+          }
         } catch {
-          /* Best effort rollback. */
+          // Best effort rollback.
         }
       });
+
       notify(
         "تعذر حفظ الفاتورة وتحديث المخزن. لم يتم تأكيد البيع؛ راجع مساحة التخزين وحاول مرة أخرى.",
       );
@@ -984,7 +738,14 @@ function SalesPage() {
               <div>
                 <h2 className="font-bold text-gray-950">أجهزة الفاتورة</h2>
                 <p className="mt-1 text-sm text-gray-700">
-                  {numberText(cart.length)} جهاز
+                  {numberText(
+                    cart.reduce(
+                      (sum, item) =>
+                        sum + Math.max(1, Number(item.quantity) || 1),
+                      0,
+                    ),
+                  )}{" "}
+                  قطعة{" "}
                 </p>
               </div>
             </div>
@@ -1056,14 +817,15 @@ function SalesPage() {
                 </div>
               )}
               <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-                <Field label="رقم IMEI (اختياري)">
+                <Field label="الكمية">
                   <input
-                    value={imeiInput}
-                    onChange={(event) => setImeiInput(event.target.value)}
-                    placeholder="سيبه فارغًا لو الرقم غير متاح"
+                    type="number"
+                    min="1"
+                    step="1"
+                    value={quantityInput}
+                    onChange={(event) => setQuantityInput(event.target.value)}
+                    className={INPUT_CLASS}
                     dir="ltr"
-                    autoComplete="off"
-                    className={`${INPUT_CLASS} text-left font-mono`}
                   />
                 </Field>
                 <Field label="الشحنة (اختياري)">
@@ -1095,7 +857,6 @@ function SalesPage() {
               <div className="flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
                 <button
                   type="button"
-                  onClick={resetAddForm}
                   className="rounded-xl border border-gray-400 bg-white px-5 py-3 text-sm font-bold text-gray-900 hover:bg-gray-100"
                 >
                   مسح الحقول
@@ -1142,16 +903,10 @@ function SalesPage() {
                         <p className="font-bold text-gray-950">
                           {item.brand} {item.series || "عام"} {item.model}
                         </p>
-                        <p
-                          className="mt-1 font-mono text-sm text-gray-800"
-                          dir="ltr"
-                        >
-                          IMEI: {item.imei.trim() || "غير مسجل"}
-                        </p>
                         <p className="mt-1 text-sm text-gray-700">
                           {batch
-                            ? `الشحنة: ${batch.supplierName || "بدون مورد"} · ${new Date(batch.receivedAt).toLocaleDateString("ar-EG")}`
-                            : "جهاز مسجل سابقًا (بدون ربط بشحنة)"}
+                            ? `الشحنة: ${batch.supplierName || "بدون مورد"} · ${new Date(batch.receivedAt).toLocaleDateString("ar-EG")} · الكمية: ${numberText(item.quantity)}`
+                            : "الشحنة غير موجودة"}
                         </p>
                       </div>
                     </div>

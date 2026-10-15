@@ -767,23 +767,6 @@ function WarehousePage() {
                 </Field>
               </div>
 
-              <Field label="أرقام IMEI (اختياري)">
-                <textarea
-                  value={form.imeisText}
-                  onChange={(event) =>
-                    updateForm("imeisText", event.target.value)
-                  }
-                  placeholder="اكتب كل رقم في سطر منفصل، أو افصل بينها بفاصلة"
-                  rows={4}
-                  dir="ltr"
-                  className={`${inputClass} resize-y text-left font-mono`}
-                />
-                <p className="mt-2 text-xs leading-6 text-gray-500">
-                  عدد أرقام IMEI لا يجوز أن يتجاوز الكمية الواردة. تُستخدم
-                  الأرقام لمنع تكرارها في دفعات المخزن أو قائمة الأجهزة المسجلة.
-                </p>
-              </Field>
-
               <div className="flex flex-col-reverse gap-3 border-t border-gray-100 pt-5 sm:flex-row sm:justify-end">
                 <button
                   type="button"

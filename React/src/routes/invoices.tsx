@@ -73,11 +73,7 @@ function InvoicesPage() {
           sale.invoiceNumber ?? "",
           sale.customerName ?? "",
           sale.customerPhone ?? "",
-          ...items.flatMap((item) => [
-            item.imei ?? "",
-            item.brand ?? "",
-            item.model ?? "",
-          ]),
+          ...items.flatMap((item) => [item.brand ?? "", item.model ?? ""]),
         ].some((value) => String(value).toLocaleLowerCase().includes(term));
       })
       .sort((a, b) => Number(b.createdAt) - Number(a.createdAt));
@@ -165,7 +161,7 @@ function InvoicesPage() {
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="ابحث برقم الفاتورة أو العميل أو IMEI"
+                placeholder="ابحث برقم الفاتورة أو العميل أو الموديل"
                 className={`${INPUT_CLASS} pr-10`}
               />
             </div>
@@ -224,7 +220,14 @@ function InvoicesPage() {
                             )}
                           </td>
                           <td className="px-5 py-4 font-semibold text-gray-900">
-                            {numberText(items.length)} جهاز
+                            {numberText(
+                              items.reduce(
+                                (sum, item) =>
+                                  sum + Math.max(1, Number(item.quantity) || 1),
+                                0,
+                              ),
+                            )}{" "}
+                            قطعة
                           </td>
                           <td className="px-5 py-4">
                             <span className="rounded-lg bg-gray-100 px-2.5 py-1.5 text-xs font-bold text-gray-900">
@@ -309,13 +312,23 @@ function InvoicesPage() {
                                           {item.brand} {item.series || "عام"}{" "}
                                           {item.model}
                                         </p>
-                                        <p
-                                          className="mt-1 font-mono text-xs text-gray-700"
-                                          dir="ltr"
-                                        >
-                                          IMEI:{" "}
-                                          {item.imei?.trim() || "غير مسجل"}
-                                        </p>
+
+                                        <div>
+                                          <p className="font-semibold text-gray-950">
+                                            {item.brand} {item.series || "عام"}{" "}
+                                            {item.model}
+                                          </p>
+                                          <p className="mt-1 text-xs text-gray-600">
+                                            الكمية:{" "}
+                                            {numberText(
+                                              Math.max(
+                                                1,
+                                                Number(item.quantity) || 1,
+                                              ),
+                                            )}{" "}
+                                            قطعة
+                                          </p>
+                                        </div>
                                       </div>
                                       <p
                                         className="font-bold text-gray-950"

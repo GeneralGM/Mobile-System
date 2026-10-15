@@ -4,12 +4,13 @@ import type { Device } from "./device";
 
 export type Method = "cash" | "credit" | "installment";
 
+
+
 export type CartItem = {
-  deviceId: Device["id"];
-  imei: Device["imei"];
-  brand: Device["brand"];
-  series: Device["series"];
-  model: Device["model"];
+  deviceId: string;
+  brand: string;
+  series: string;
+  model: string;
   color: string;
   ram: string;
   storage: string;
@@ -20,12 +21,13 @@ export type CartItem = {
   installmentFinalPrice: number;
   finalPrice: number;
   offerName: string;
-  // Optional reference to the original warehouse shipment.
+  quantity: number;
   warehouseBatchId?: string;
   unitCost?: number;
-  // New device records are created only when the sale is confirmed.
   isNewStock?: boolean;
 };
+
+
 
 export type Installment = {
   number: number;

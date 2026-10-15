@@ -64,21 +64,14 @@ const shortcuts = [
     title: "فاتورة بيع جديدة",
     description: "بيع موبايل أو إكسسوار",
     icon: CirclePlus,
-    to: "/orders" as const,
+    to: "/sales" as const,
     color: "bg-emerald-50 text-emerald-700",
-  },
-  {
-    title: "إضافة مخزون",
-    description: "تسجيل أجهزة أو إكسسوارات",
-    icon: Boxes,
-    to: "/entry" as const,
-    color: "bg-blue-50 text-blue-700",
   },
   {
     title: "إدارة المخزون",
     description: "عرض الأصناف والأجهزة",
     icon: Smartphone,
-    to: "/inventory" as const,
+    to: "/warehouse" as const,
     color: "bg-violet-50 text-violet-700",
   },
   {
@@ -139,7 +132,7 @@ function Dashboard() {
             </p>
 
             <Link
-              to="/inventory"
+              to="/warehouse"
               className="mt-5 inline-flex items-center gap-2 rounded-xl bg-white px-4 py-3 text-sm font-bold text-[#102b25] transition hover:bg-emerald-50"
             >
               استكشف المخزون

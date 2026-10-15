@@ -1,4 +1,5 @@
 /* eslint-disable prettier/prettier */
+
 export type DeviceStatus = "available" | "sold" | "reserved";
 
 export type Offer = {
@@ -13,10 +14,7 @@ export type Brand = {
   id: string;
   name: string;
   models: string[];
-  series: {
-    name: string;
-    models: string[];
-  }[];
+  series: { name: string; models: string[] }[];
 };
 
 export type Device = {
@@ -33,14 +31,9 @@ export type Device = {
   offer: Offer | null;
   status: DeviceStatus;
   createdAt: number;
-    // الشحنة التي دخل منها الجهاز
+  // Optional for backwards compatibility with existing device records.
   warehouseBatchId?: string;
-
-  // تكلفة شراء الجهاز
   unitCost?: number;
-
-  // سعر البيع بالجملة إن وجد
-  wholesalePrice?: number;
 };
 
 export type DeviceForm = {

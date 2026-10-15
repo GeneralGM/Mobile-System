@@ -18,6 +18,8 @@ import {
   Store,
   Construction,
   BadgeDollarSign,
+  ReceiptText,
+  HandCoins,
 } from "lucide-react";
 
 type AppShellProps = {
@@ -25,31 +27,40 @@ type AppShellProps = {
 };
 
 const navigation = [
-  { label: "لوحة التحكم",
-    icon: LayoutDashboard,
-    to: "/", active: true 
-  },
-  {
-    label: "الموبايلات",
-    to: "/devices",
-    icon: Smartphone,
-  },
+  { label: "لوحة التحكم", icon: LayoutDashboard, to: "/", active: true },
   {
     label: "المبيعات",
     to: "/sales",
     icon: BadgeDollarSign,
   },
   {
-  label: "المخزن",
-  to: "/warehouse",
-  icon: Package,
-},
-  { label: "الأجهزة والـ IMEI", icon: Smartphone },
+    label: "المخزن",
+    to: "/warehouse",
+    icon: Package,
+  },
+  {
+    label: "الفواتير",
+    to: "/invoices",
+    icon: ReceiptText,
+  },
+  {
+    label: "الأقساط",
+    to: "/installlments",
+    icon: HandCoins,
+  },
+  {
+    label: "المرتجعات",
+    to: "/returns",
+    icon: RotateCcw,
+  },
+  {
+    label: "سجل المرتحعات",
+    to: "/returns-history",
+    icon: RotateCcw,
+  },
   { label: "الإكسسوارات", icon: Package },
-  { label: "المبيعات والفواتير", icon: ShoppingCart },
   { label: "العملاء والموردون", icon: Users },
   { label: "الأقساط والتحصيل", icon: CreditCard },
-  { label: "المرتجعات", icon: RotateCcw },
   { label: "التقارير", icon: ChartNoAxesCombined },
   { label: "الإعدادات", icon: Settings },
 ] as const;
@@ -200,32 +211,7 @@ export function AppShell({ children }: AppShellProps) {
         </header>
 
         <main className="mx-auto w-full max-w-[1600px] p-4 sm:p-7 lg:p-8">
-          {notice && (
-            <div
-              role="status"
-              className="mb-5 flex items-start gap-3 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-950"
-            >
-              <Construction size={19} className="mt-0.5 shrink-0" />
-              <div className="flex-1">
-                <p className="font-bold">
-                  {notice === "الإشعارات"
-                    ? "الإشعارات"
-                    : `${notice} — تحت التجهيز`}
-                </p>
-                <p className="mt-1 text-amber-900/80">
-                  هنفعّل القسم ده لما نبني صفحته ونربطه ببيانات النظام الجديد.
-                </p>
-              </div>
-              <button
-                type="button"
-                aria-label="إغلاق التنبيه"
-                onClick={() => setNotice("")}
-                className="rounded-md p-1 hover:bg-amber-100"
-              >
-                <X size={17} />
-              </button>
-            </div>
-          )}
+  
 
           {children}
         </main>
