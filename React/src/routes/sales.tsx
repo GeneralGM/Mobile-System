@@ -17,11 +17,9 @@ import {
 import SearchSelect from "../components/SearchSelect";
 import type { WarehouseBatch } from "../types/warehouse";
 import type { CartItem, Installment, Method, Sale } from "../types/sales";
+import { api } from "../lib/api-client";
 
 export const Route = createFileRoute("/sales")({ component: SalesPage });
-
-const SALES_KEY = "mobile-system-sales-v1";
-const WAREHOUSE_KEY = "mobile-system-warehouse-v1";
 
 const INPUT_CLASS =
   "w-full rounded-xl border border-gray-400 bg-white px-3.5 py-3 text-sm font-medium text-gray-950 shadow-sm outline-none placeholder:text-gray-500 focus:border-emerald-700 focus:ring-4 focus:ring-emerald-700/15 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500";
@@ -39,16 +37,6 @@ function numberText(value: number) {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(
     Number.isFinite(value) ? value : 0,
   );
-}
-
-function readArray<T>(key: string): T[] {
-  try {
-    const raw = localStorage.getItem(key);
-    const parsed: unknown = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? (parsed as T[]) : [];
-  } catch {
-    return [];
-  }
 }
 
 function makeId() {
@@ -128,9 +116,26 @@ function SalesPage() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
-    setBatches(readArray<WarehouseBatch>(WAREHOUSE_KEY));
-    setSales(readArray<Sale>(SALES_KEY));
-    setReady(true);
+    let cancelled = false;
+    Promise.all([api.getWarehouseBatches(), api.getSales()])
+      .then(([freshBatches, freshSales]) => {
+        if (cancelled) return;
+        setBatches(freshBatches);
+        setSales(freshSales as Sale[]);
+        setReady(true);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        notify(
+          error instanceof Error
+            ? error.message
+            : "تعذر الاتصال بقاعدة البيانات.",
+        );
+        setReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -398,7 +403,7 @@ function SalesPage() {
       return;
     }
 
-    const allCurrentBatches = readArray<WarehouseBatch>(WAREHOUSE_KEY);
+    const allCurrentBatches = batches;
 
     const matchingBatches = allCurrentBatches
       .filter(
@@ -490,7 +495,7 @@ function SalesPage() {
     setNotes("");
   }
 
-  function submitSale(event: FormEvent<HTMLFormElement>) {
+  async function submitSale(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     if (saving) return;
@@ -500,10 +505,25 @@ function SalesPage() {
       return;
     }
 
-    const currentBatches = readArray<WarehouseBatch>(WAREHOUSE_KEY);
-    const currentSales = readArray<Sale>(SALES_KEY);
+    let currentBatches: WarehouseBatch[];
+    let currentSales: Sale[];
+    try {
+      [currentBatches, currentSales] = (await Promise.all([
+        api.getWarehouseBatches(),
+        api.getSales(),
+      ])) as [WarehouseBatch[], Sale[]];
+      setBatches(currentBatches);
+      setSales(currentSales);
+    } catch (error) {
+      notify(
+        error instanceof Error
+          ? error.message
+          : "تعذر تحديث بيانات المخزن والفواتير.",
+      );
+      return;
+    }
 
-    // التحقق من الكميات المطلوبة من كل شحنة
+    // التحقق من الكميات المطلوبة من كل شحنة، ثم يعيد الخادم التحقق داخل معاملة PostgreSQL.
     const batchCounts = new Map<string, number>();
 
     for (const item of cart) {
@@ -623,66 +643,25 @@ function SalesPage() {
         roundedRemaining <= 0 ? "paid" : roundedPaid > 0 ? "partial" : "unpaid",
     };
 
-    // حساب الكمية المباعة من كل شحنة
-    const soldPerBatch = new Map<string, number>();
-
-    for (const item of finalItems) {
-      if (!item.warehouseBatchId) continue;
-
-      const quantity = Math.max(1, Number(item.quantity) || 1);
-
-      soldPerBatch.set(
-        item.warehouseBatchId,
-        (soldPerBatch.get(item.warehouseBatchId) || 0) + quantity,
-      );
-    }
-
-    // خصم الكميات المباعة من المخزن
-    const nextBatches = currentBatches.map((batch) => {
-      const quantity = soldPerBatch.get(batch.id) || 0;
-
-      if (!quantity) return batch;
-
-      return {
-        ...batch,
-        availableQuantity: Number(batch.availableQuantity) - quantity,
-      };
-    });
-
     setSaving(true);
 
-    const oldValues = new Map<string, string | null>();
-
-    [SALES_KEY, WAREHOUSE_KEY].forEach((key) => {
-      oldValues.set(key, localStorage.getItem(key));
-    });
-
     try {
-      localStorage.setItem(SALES_KEY, JSON.stringify([sale, ...currentSales]));
-
-      localStorage.setItem(WAREHOUSE_KEY, JSON.stringify(nextBatches));
-
-      setSales([sale, ...currentSales]);
-      setBatches(nextBatches);
-
+      const savedSale = await api.createSale(sale);
+      const [freshSales, freshBatches] = await Promise.all([
+        api.getSales(),
+        api.getWarehouseBatches(),
+      ]);
+      setSales(freshSales as Sale[]);
+      setBatches(freshBatches);
       resetSale();
-
-      notify(`تم تسجيل الفاتورة ${sale.invoiceNumber} وتحديث المخزن بنجاح.`);
-    } catch {
-      oldValues.forEach((value, key) => {
-        try {
-          if (value === null) {
-            localStorage.removeItem(key);
-          } else {
-            localStorage.setItem(key, value);
-          }
-        } catch {
-          // Best effort rollback.
-        }
-      });
-
       notify(
-        "تعذر حفظ الفاتورة وتحديث المخزن. لم يتم تأكيد البيع؛ راجع مساحة التخزين وحاول مرة أخرى.",
+        `تم تسجيل الفاتورة ${savedSale.invoiceNumber} وتحديث المخزن في قاعدة البيانات بنجاح.`,
+      );
+    } catch (error) {
+      notify(
+        error instanceof Error
+          ? error.message
+          : "تعذر حفظ الفاتورة. لم يتم تأكيد البيع.",
       );
     } finally {
       setSaving(false);

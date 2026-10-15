@@ -20,6 +20,7 @@ import {
 } from "lucide-react";
 
 import { createFileRoute } from "@tanstack/react-router";
+import { api } from "../lib/api-client";
 
 export const Route = createFileRoute("/installlments")({
   component: InstallmentsPage,
@@ -117,9 +118,6 @@ function isoDate(date: Date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
 
-const SALES_KEY = "mobile-system-sales-v1";
-const RETURNS_KEY = "mobile-system-returns-v1";
-
 type SaleInstallment = {
   number: number;
   amount: number;
@@ -145,55 +143,6 @@ type SaleRecord = {
   notes: string;
   status: "paid" | "partial" | "unpaid";
 };
-
-function readSales(): SaleRecord[] {
-  if (typeof window === "undefined") return [];
-  try {
-    const raw = window.localStorage.getItem(SALES_KEY);
-    if (!raw) return [];
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-
-    // Older return records already lowered installment amounts, but didn't store the offset
-    // separately. Restore that offset so the reduction isn't miscounted as a down payment.
-    let returnRows: Array<{ invoiceId?: string; balanceReduced?: number }> = [];
-    try {
-      const rawReturns = window.localStorage.getItem(RETURNS_KEY);
-      const parsedReturns: unknown = rawReturns ? JSON.parse(rawReturns) : [];
-      if (Array.isArray(parsedReturns)) returnRows = parsedReturns;
-    } catch {
-      returnRows = [];
-    }
-
-    return parsed
-      .filter(
-        (sale): sale is SaleRecord =>
-          !!sale &&
-          typeof sale === "object" &&
-          typeof sale.id === "string" &&
-          Array.isArray(sale.installments),
-      )
-      .map((sale) => {
-        if (Number(sale.returnBalanceReduced) > 0) return sale;
-        const appliedReturnValue = returnRows
-          .filter((record) => record.invoiceId === sale.id)
-          .reduce(
-            (sum, record) =>
-              sum + Math.max(0, Number(record.balanceReduced) || 0),
-            0,
-          );
-        return appliedReturnValue > 0
-          ? { ...sale, returnBalanceReduced: appliedReturnValue }
-          : sale;
-      });
-  } catch {
-    return [];
-  }
-}
-
-function loadSales(): SaleRecord[] {
-  return readSales().filter((sale) => sale.paymentMethod === "installment");
-}
 
 function toContract(sale: SaleRecord): Contract {
   const installments: Installment[] = sale.installments.map((item) => {
@@ -239,10 +188,6 @@ function toContract(sale: SaleRecord): Contract {
     installmentCount: sale.installmentsCount || installments.length,
     installments,
   };
-}
-
-function loadContracts(): Contract[] {
-  return loadSales().map(toContract);
 }
 
 const statusMeta: Record<
@@ -311,7 +256,28 @@ export default function InstallmentsPage() {
   const [contracts, setContracts] = useState<Contract[]>([]);
 
   useEffect(() => {
-    setContracts(loadContracts());
+    let cancelled = false;
+    api
+      .getSales()
+      .then((rows) => {
+        if (cancelled) return;
+        setContracts(
+          rows
+            .filter((sale) => sale.paymentMethod === "installment")
+            .map((sale) => toContract(sale as SaleRecord)),
+        );
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setPaymentError(
+          error instanceof Error
+            ? error.message
+            : "تعذر تحميل الأقساط من الخادم.",
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const [query, setQuery] = useState("");
@@ -449,7 +415,7 @@ export default function InstallmentsPage() {
     setPaymentError("");
   };
 
-  const savePayment = () => {
+  const savePayment = async () => {
     if (!paymentTarget || !paymentInstallment) return;
     const amount = Number(paymentAmount);
     const remaining = paymentInstallment.amount - paymentInstallment.paidAmount;
@@ -464,55 +430,28 @@ export default function InstallmentsPage() {
     }
 
     try {
-      const sales = readSales();
-      const saleIndex = sales.findIndex(
-        (sale) => sale.id === paymentTarget.contractId,
-      );
-      if (saleIndex < 0) {
-        setPaymentError(
-          "الفاتورة الأصلية مش موجودة في التخزين. حدّث الصفحة وجرب تاني.",
-        );
-        return;
-      }
-
-      const sale = sales[saleIndex];
-      const installmentNumber = paymentInstallment.number;
-      const updatedInstallments = sale.installments.map((item) => {
-        if (item.number !== installmentNumber) return item;
-        const alreadyPaid = Math.max(
-          0,
-          Number(item.paidAmount ?? (item.paid ? item.amount : 0)),
-        );
-        const paidAmount = Math.min(item.amount, alreadyPaid + amount);
-        return { ...item, paidAmount, paid: paidAmount >= item.amount };
+      await api.recordPayment({
+        saleId: paymentTarget.contractId,
+        installmentNumber: paymentInstallment.number,
+        amount,
+        note: paymentNote.trim(),
       });
-      const amountPaid = Math.min(sale.total, sale.amountPaid + amount);
-      const remainingAmount = Math.max(0, sale.remainingAmount - amount);
-      const paymentRecord = `${new Date().toISOString()} — تحصيل القسط رقم ${installmentNumber}: ${currency(amount)}${paymentNote.trim() ? ` — ${paymentNote.trim()}` : ""}`;
-      const updatedSale: SaleRecord = {
-        ...sale,
-        installments: updatedInstallments,
-        amountPaid,
-        remainingAmount,
-        status:
-          remainingAmount <= 0 ? "paid" : amountPaid > 0 ? "partial" : "unpaid",
-        notes: [sale.notes, paymentRecord].filter(Boolean).join("\n"),
-      };
-      sales[saleIndex] = updatedSale;
-      window.localStorage.setItem(SALES_KEY, JSON.stringify(sales));
+      const rows = await api.getSales();
       setContracts(
-        sales
-          .filter((item) => item.paymentMethod === "installment")
-          .map(toContract),
+        rows
+          .filter((sale) => sale.paymentMethod === "installment")
+          .map((sale) => toContract(sale as SaleRecord)),
       );
       setSelectedContractId(paymentTarget.contractId);
       setPaymentTarget(null);
       setPaymentAmount("");
       setPaymentNote("");
       setPaymentError("");
-    } catch {
+    } catch (error) {
       setPaymentError(
-        "حصلت مشكلة أثناء حفظ الدفعة. اتأكد إن التخزين متاح وجرب تاني.",
+        error instanceof Error
+          ? error.message
+          : "تعذر تسجيل التحصيل في قاعدة البيانات. حاول مرة أخرى.",
       );
     }
   };

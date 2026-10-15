@@ -1,6 +1,7 @@
 /* eslint-disable prettier/prettier */
 import { useEffect, useMemo, useState } from "react";
 import { createFileRoute } from "@tanstack/react-router";
+import { api } from "../lib/api-client";
 import {
   Search,
   RotateCcw,
@@ -100,23 +101,10 @@ interface ReturnRecord {
   linkedNewInvoiceNumber?: string;
 }
 
-const SALES_STORAGE_KEY = "mobile-system-sales-v1";
-const RETURNS_STORAGE_KEY = "mobile-system-returns-v1";
-
 const money = (n: number) =>
   `${(Number.isFinite(n) ? n : 0).toLocaleString("en-US", {
     maximumFractionDigits: 2,
   })} ج.م`;
-
-function safeRead<T>(key: string, fallback: T): T {
-  try {
-    if (typeof window === "undefined") return fallback;
-    const raw = window.localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}
 
 function getUnitPrice(item: CartItem, method: PaymentMethod) {
   // Use the actual final price stored on the sold line first.
@@ -242,8 +230,26 @@ function ReturnsPage() {
   } | null>(null);
 
   useEffect(() => {
-    setSales(safeRead<Sale[]>(SALES_STORAGE_KEY, []));
-    setReturns(safeRead<ReturnRecord[]>(RETURNS_STORAGE_KEY, []));
+    let cancelled = false;
+    Promise.all([api.getSales(), api.getReturns()])
+      .then(([saleRows, returnRows]) => {
+        if (cancelled) return;
+        setSales(saleRows as Sale[]);
+        setReturns(returnRows as ReturnRecord[]);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setNotification({
+          type: "error",
+          message:
+            error instanceof Error
+              ? error.message
+              : "تعذر تحميل بيانات المرتجعات من الخادم.",
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const customersList = useMemo(() => {
@@ -320,265 +326,94 @@ function ReturnsPage() {
     setIsModalOpen(true);
   };
 
-  const handleConfirmReturn = () => {
+  const handleConfirmReturn = async () => {
     if (!selectedInvoice || !activeItem) return;
+    const invoiceId = selectedInvoice.id;
     const { index } = activeItem;
 
-    // Read fresh values before writing so stale React state cannot overwrite another return.
-    const latestSales = safeRead<Sale[]>(SALES_STORAGE_KEY, sales);
-    const latestReturns = safeRead<ReturnRecord[]>(
-      RETURNS_STORAGE_KEY,
-      returns,
-    );
-    const latestInvoice = latestSales.find((s) => s.id === selectedInvoice.id);
-    if (!latestInvoice) {
-      setNotification({
-        type: "error",
-        message: "الفاتورة الأصلية غير موجودة في التخزين.",
-      });
-      return;
-    }
-
-    const latestItem = latestInvoice.items[index];
-    if (!latestItem) {
-      setNotification({
-        type: "error",
-        message: "لم يتم العثور على المنتج داخل الفاتورة.",
-      });
-      return;
-    }
-    // Count return records as the source of truth; the original sale line is intentionally unchanged.
-    const returnedFromRecords = latestReturns
-      .filter(
-        (record) =>
-          record.invoiceId === latestInvoice.id && record.itemIndex === index,
-      )
-      .reduce(
-        (sum, record) =>
-          sum + Math.max(0, Number(record.quantityReturned) || 0),
-        0,
-      );
-    const alreadyReturned = Math.max(
-      0,
-      Number(latestItem.returnedQuantity) || 0,
-      returnedFromRecords,
-    );
-    const maxAvailable = Math.max(
-      0,
-      Number(latestItem.quantity) - alreadyReturned,
-    );
-    if (
-      !Number.isInteger(returnQty) ||
-      returnQty <= 0 ||
-      returnQty > maxAvailable
-    ) {
-      setNotification({
-        type: "error",
-        message: `الكمية غير صحيحة. المتاح للإرجاع: ${maxAvailable}.`,
-      });
-      return;
-    }
-
-    // Prevent duplicate confirmation for the same click/session and re-check quantity from storage.
-    const unitPrice = getUnitPrice(latestItem, latestInvoice.paymentMethod);
-    if (unitPrice <= 0) {
-      setNotification({
-        type: "error",
-        message:
-          "لم يتم العثور على سعر بيع صالح لهذا المنتج؛ لم يتم حفظ المرتجع.",
-      });
-      return;
-    }
-    const refundAmount = Math.round(unitPrice * returnQty * 100) / 100;
-    const usageFee = getUsageFee(latestInvoice, refundAmount);
-    const netReturnAmount =
-      Math.round(Math.max(0, refundAmount - usageFee) * 100) / 100;
-    const returnId = `RET-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-
-    // A return is stored separately. Never change the original invoice total or its sold items.
-    const returnNumber = `R-${new Date().getFullYear()}-${Date.now().toString().slice(-6)}`;
-    const scheduleOutstanding = getScheduleOutstanding(latestInvoice);
-    // Match the amount actually visible as outstanding in the installment schedule.
-    const balanceBefore =
-      latestInvoice.paymentMethod === "installment"
-        ? Math.min(
-            Math.max(0, Number(latestInvoice.remainingAmount) || 0),
-            Math.max(0, scheduleOutstanding),
-          )
-        : latestInvoice.paymentMethod === "credit"
-          ? Math.max(0, Number(latestInvoice.remainingAmount) || 0)
-          : 0;
-    // Deduct complete-month usage first, then apply the net return value to outstanding debt.
-    const balanceReduced =
-      Math.round(Math.min(netReturnAmount, balanceBefore) * 100) / 100;
-    const customerRefundAmount =
-      Math.round(Math.max(0, netReturnAmount - balanceReduced) * 100) / 100;
-
-    const updatedSales = latestSales.map((sale) => {
-      if (sale.id !== latestInvoice.id || balanceReduced <= 0) return sale;
-
-      if (sale.paymentMethod === "credit") {
-        const remainingAmount =
-          Math.round(
-            Math.max(0, (Number(sale.remainingAmount) || 0) - balanceReduced) *
-              100,
-          ) / 100;
-        return {
-          ...sale,
-          // Preserve the original total and amount already collected for regular credit sales too.
-          remainingAmount,
-          notes: [
-            sale.notes,
-            `فاتورة مرتجع ${returnNumber} (${returnId}): قيمة المرتجع ${refundAmount} ج.م، خصم استخدام ${usageFee} ج.م، وصافي المرتجع ${netReturnAmount} ج.م؛ خُصم ${balanceReduced} ج.م من المديونية${customerRefundAmount > 0 ? `، ومستحق للعميل رد ${customerRefundAmount} ج.م` : ""}.`,
-          ]
-            .filter(Boolean)
-            .join("\n"),
-          status:
-            remainingAmount <= 0
-              ? "paid"
-              : Number(sale.amountPaid) > 0
-                ? "partial"
-                : "unpaid",
-        };
-      }
-
-      if (sale.paymentMethod !== "installment") return sale;
-      let reductionLeft = balanceReduced;
-      // Reduce only unpaid portions, starting from the latest installment. Keep actual collections intact.
-      const installments = (sale.installments ?? [])
-        .map((installment) => ({ ...installment }))
-        .sort((a, b) => b.number - a.number);
-
-      for (const installment of installments) {
-        if (reductionLeft <= 0.000001) break;
-        const currentAmount = Math.max(0, Number(installment.amount) || 0);
-        const alreadyPaidAmount = Math.min(
-          currentAmount,
-          Math.max(
-            0,
-            Number(
-              installment.paidAmount ?? (installment.paid ? currentAmount : 0),
-            ) || 0,
-          ),
-        );
-        const unpaidAmount = Math.max(0, currentAmount - alreadyPaidAmount);
-        if (unpaidAmount <= 0.000001) continue;
-
-        const applied = Math.min(unpaidAmount, reductionLeft);
-        installment.amount =
-          Math.round(
-            Math.max(alreadyPaidAmount, currentAmount - applied) * 100,
-          ) / 100;
-        // Persist paidAmount explicitly so Installments.tsx can distinguish waived debt from money collected.
-        installment.paidAmount = alreadyPaidAmount;
-        installment.paid = installment.amount <= alreadyPaidAmount + 0.000001;
-        reductionLeft =
-          Math.round(Math.max(0, reductionLeft - applied) * 100) / 100;
-      }
-
-      const appliedToSchedule =
-        Math.round((balanceReduced - reductionLeft) * 100) / 100;
-      const remainingAmount =
-        Math.round(
-          Math.max(0, (Number(sale.remainingAmount) || 0) - appliedToSchedule) *
-            100,
-        ) / 100;
-      const previousRecordedReductions = latestReturns
-        .filter((record) => record.invoiceId === sale.id)
+    try {
+      // Fetch fresh rows before submitting; the server revalidates quantity and computes
+      // usage fees, debt reduction and any amount due to the customer in one transaction.
+      const [freshSales, freshReturns] = await Promise.all([
+        api.getSales(),
+        api.getReturns(),
+      ]);
+      const latestInvoice = freshSales.find((sale) => sale.id === invoiceId) as
+        | Sale
+        | undefined;
+      if (!latestInvoice)
+        throw new Error("الفاتورة الأصلية غير موجودة في قاعدة البيانات.");
+      const latestItem = latestInvoice.items[index];
+      if (!latestItem)
+        throw new Error("لم يتم العثور على المنتج داخل الفاتورة.");
+      const alreadyReturned = freshReturns
+        .filter(
+          (record) =>
+            record.invoiceId === latestInvoice.id && record.itemIndex === index,
+        )
         .reduce(
           (sum, record) =>
-            sum + Math.max(0, Number(record.balanceReduced) || 0),
+            sum + Math.max(0, Number(record.quantityReturned) || 0),
           0,
         );
-      const existingReturnReduction =
-        Number(sale.returnBalanceReduced) > 0
-          ? Math.max(0, Number(sale.returnBalanceReduced))
-          : previousRecordedReductions;
-      return {
-        ...sale,
-        // Keep the historic total and collections unchanged; track debt waived by returns separately.
-        remainingAmount,
-        returnBalanceReduced:
-          Math.round((existingReturnReduction + appliedToSchedule) * 100) / 100,
-        installments: installments.sort((a, b) => a.number - b.number),
-        notes: [
-          sale.notes,
-          `فاتورة مرتجع ${returnNumber} (${returnId}): قيمة المرتجع ${refundAmount} ج.م، خصم استخدام ${usageFee} ج.م، وصافي المرتجع ${netReturnAmount} ج.م؛ خُصم ${appliedToSchedule} ج.م من المديونية${customerRefundAmount > 0 ? `، ومستحق للعميل رد ${customerRefundAmount} ج.م` : ""}.`,
-        ]
-          .filter(Boolean)
-          .join("\n"),
-        status:
-          remainingAmount <= 0
-            ? "paid"
-            : Number(sale.amountPaid) > 0
-              ? "partial"
-              : "unpaid",
-      };
-    });
-
-    const record: ReturnRecord = {
-      returnId,
-      returnNumber,
-      createdAt: new Date().toISOString(),
-      invoiceId: latestInvoice.id,
-      invoiceNumber: latestInvoice.invoiceNumber,
-      customerName: latestInvoice.customerName,
-      customerPhone: latestInvoice.customerPhone,
-      itemIndex: index,
-      deviceId: latestItem.deviceId,
-      model: `${latestItem.brand} ${latestItem.model} (${latestItem.storage}, ${latestItem.color})`,
-      quantityReturned: returnQty,
-      unitPrice,
-      totalRefundAmount: refundAmount,
-      usageFee,
-      netReturnAmount,
-      balanceReduced,
-      customerRefundAmount,
-      // No separate customer refund is owed when the full return value was applied to debt.
-      settlementStatus: customerRefundAmount > 0 ? "pending" : "completed",
-      reason: returnReason,
-      deviceCondition,
-      settlementMethod,
-      status: "completed",
-    };
-    const updatedReturns = [record, ...latestReturns];
-
-    try {
-      const oldSalesRaw = window.localStorage.getItem(SALES_STORAGE_KEY);
-      try {
-        window.localStorage.setItem(
-          SALES_STORAGE_KEY,
-          JSON.stringify(updatedSales),
-        );
-        window.localStorage.setItem(
-          RETURNS_STORAGE_KEY,
-          JSON.stringify(updatedReturns),
-        );
-      } catch (writeError) {
-        if (oldSalesRaw !== null)
-          window.localStorage.setItem(SALES_STORAGE_KEY, oldSalesRaw);
-        else window.localStorage.removeItem(SALES_STORAGE_KEY);
-        throw writeError;
-      }
-      setSales(updatedSales);
-      setReturns(updatedReturns);
-      setSelectedInvoice(
-        updatedSales.find((sale) => sale.id === latestInvoice.id) ?? null,
+      const maxAvailable = Math.max(
+        0,
+        Number(latestItem.quantity) -
+          Math.max(alreadyReturned, Number(latestItem.returnedQuantity) || 0),
       );
+      if (
+        !Number.isInteger(returnQty) ||
+        returnQty < 1 ||
+        returnQty > maxAvailable
+      ) {
+        throw new Error(`الكمية غير صحيحة. المتاح للإرجاع: ${maxAvailable}.`);
+      }
+      const grossPreview =
+        Math.round(
+          getUnitPrice(latestItem, latestInvoice.paymentMethod) *
+            returnQty *
+            100,
+        ) / 100;
+      if (grossPreview <= 0)
+        throw new Error("لم يتم العثور على سعر بيع صالح لهذا المنتج.");
+
+      const savedReturn = await api.createReturn({
+        invoiceId: latestInvoice.id,
+        itemIndex: index,
+        quantityReturned: returnQty,
+        reason: returnReason,
+        deviceCondition,
+        settlementMethod,
+      });
+      const [updatedSales, updatedReturns] = await Promise.all([
+        api.getSales(),
+        api.getReturns(),
+      ]);
+      const refreshedInvoice = updatedSales.find(
+        (sale) => sale.id === invoiceId,
+      ) as Sale | undefined;
+      setSales(updatedSales as Sale[]);
+      setReturns(updatedReturns as ReturnRecord[]);
+      setSelectedInvoice(refreshedInvoice ?? null);
       setIsModalOpen(false);
+      const amount = Number(savedReturn.totalRefundAmount) || grossPreview;
+      const fee = Number(savedReturn.usageFee) || 0;
+      const net =
+        Number(savedReturn.netReturnAmount) || Math.max(0, amount - fee);
+      const reduced = Number(savedReturn.balanceReduced) || 0;
+      const refund = Number(savedReturn.customerRefundAmount) || 0;
       setNotification({
         type: "success",
-        message:
-          latestInvoice.paymentMethod === "installment"
-            ? `تم إنشاء فاتورة المرتجع ${returnNumber}، ومرجع العملية ${returnId}. قيمة المرتجع ${money(refundAmount)}، وخصم الاستخدام عن الشهور المكتملة ${money(usageFee)}، وصافي المرتجع ${money(netReturnAmount)}. اتخصم ${money(balanceReduced)} من المديونية غير المسددة، والمستحق رده للعميل ${money(customerRefundAmount)}. إجمالي الفاتورة الأصلية والتحصيلات السابقة لم يتغيرا.`
-            : `تم إنشاء فاتورة المرتجع ${returnNumber}، ومرجع العملية ${returnId}، بقيمة ${money(refundAmount)}. المستحق رده للعميل ${money(customerRefundAmount)} ويظل قيد التسوية حتى تأكيد تنفيذه.`,
+        message: `تم إنشاء فاتورة المرتجع ${savedReturn.returnNumber || savedReturn.returnId}. قيمة المرتجع ${money(amount)}، خصم الاستخدام ${money(fee)}، صافي المرتجع ${money(net)}. خُصم ${money(reduced)} من المديونية، والمستحق رده للعميل ${money(refund)}. إجمالي الفاتورة الأصلية والتحصيلات السابقة لم يتغيرا.`,
       });
     } catch (error) {
       console.error("Error creating return invoice:", error);
       setNotification({
         type: "error",
         message:
-          "فشل حفظ فاتورة المرتجع أو تحديث الأقساط. تم التراجع عن تعديل المبيعات قدر الإمكان؛ حاول مرة أخرى.",
+          error instanceof Error
+            ? error.message
+            : "تعذر تسجيل المرتجع في قاعدة البيانات. لم يتم تأكيد العملية.",
       });
     }
   };

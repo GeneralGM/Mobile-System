@@ -6,6 +6,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 
 import { createFileRoute } from "@tanstack/react-router";
+import { api } from "../lib/api-client";
 
 import {
   Search,
@@ -62,65 +63,10 @@ interface ReturnRecord {
   linkedNewInvoiceNumber?: string;
 }
 
-const RETURNS_STORAGE_KEY = "mobile-system-returns-v1";
-const SALES_STORAGE_KEY = "mobile-system-sales-v1";
-
 const money = (n: number) =>
   `${(Number.isFinite(n) ? n : 0).toLocaleString("en-US", {
     maximumFractionDigits: 2,
   })} ج.م`;
-
-function safeRead<T>(key: string, fallback: T): T {
-  try {
-    if (typeof window === "undefined") return fallback;
-    const raw = window.localStorage.getItem(key);
-    return raw ? (JSON.parse(raw) as T) : fallback;
-  } catch {
-    return fallback;
-  }
-}
-
-function readReturnRecords(): ReturnRecord[] {
-  const rawReturns = safeRead<unknown>(RETURNS_STORAGE_KEY, []);
-  const rawRecords = Array.isArray(rawReturns)
-    ? rawReturns.filter(
-        (item): item is ReturnRecord => !!item && typeof item === "object",
-      )
-    : [];
-  // Normalize missing IDs/dates in older or partially written records to keep the history usable.
-  const records = rawRecords.map((record, index) => ({
-    ...record,
-    returnId: String(
-      record.returnId || record.returnNumber || `legacy-return-${index + 1}`,
-    ),
-    createdAt: record.createdAt ?? "",
-  }));
-  const rawSales = safeRead<unknown>(SALES_STORAGE_KEY, []);
-  const sales = Array.isArray(rawSales)
-    ? rawSales.filter(
-        (item): item is { invoiceNumber?: string; notes?: string } =>
-          !!item && typeof item === "object",
-      )
-    : [];
-
-  // For exchanges, the replacement sale is intentionally a separate invoice. Resolve the link
-  // from its notes (containing the return ID/number) without changing the original sale record.
-  return records.map((record) => {
-    if (record.linkedNewInvoiceNumber) return record;
-    const identifiers = [record.returnId, record.returnNumber].filter(
-      Boolean,
-    ) as string[];
-    if (identifiers.length === 0) return record;
-    const linkedSale = sales.find(
-      (sale) =>
-        typeof sale.notes === "string" &&
-        identifiers.some((identifier) => sale.notes!.includes(identifier)),
-    );
-    return linkedSale?.invoiceNumber
-      ? { ...record, linkedNewInvoiceNumber: linkedSale.invoiceNumber }
-      : record;
-  });
-}
 
 function numeric(value: unknown): number {
   const result = Number(value);
@@ -236,7 +182,23 @@ function ReturnsHistoryPage() {
   );
 
   useEffect(() => {
-    setReturns(readReturnRecords());
+    let cancelled = false;
+    api
+      .getReturns()
+      .then((rows) => {
+        if (!cancelled) setReturns(rows as ReturnRecord[]);
+      })
+      .catch((error: unknown) => {
+        if (!cancelled)
+          window.alert(
+            error instanceof Error
+              ? error.message
+              : "تعذر تحميل سجل المرتجعات من الخادم.",
+          );
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   //* الحسابات المالية لبطاقات الملخص*
@@ -393,54 +355,52 @@ function ReturnsHistoryPage() {
     URL.revokeObjectURL(url);
   };
 
-  const confirmSettlement = (returnId: string) => {
-    const latestRecords = readReturnRecords();
-    const target = latestRecords.find((record) => record.returnId === returnId);
-    if (!target) {
-      window.alert(
-        "سجل المرتجع غير موجود في التخزين. حدّث الصفحة وحاول مرة أخرى.",
-      );
-      return;
-    }
-    const due = customerAmountDue(target);
-    if (due <= 0) {
-      window.alert(
-        "لا يوجد مبلغ منفصل مستحق للعميل؛ قيمة المرتجع تمت تسويتها مع المديونية.",
-      );
-      return;
-    }
-    if (settlementState(target) === "completed") return;
-
-    const channel =
-      target.settlementMethod === "store_credit"
-        ? "إصدار رصيد العميل"
-        : target.settlementMethod === "cash_refund"
-          ? "رد المبلغ نقدًا"
-          : "تسوية المبلغ المستحق للعميل";
-    const confirmed = window.confirm(
-      `هل تم تنفيذ ${channel} بمبلغ ${money(due)} بالفعل؟\n\nسيتم تحديث حالة التسوية في سجل المرتجع فقط. لن يتم إنشاء حركة خزنة أو رصيد متجر منفصل تلقائيًا.`,
-    );
-    if (!confirmed) return;
-
-    const updatedRecords = latestRecords.map((record) =>
-      record.returnId === returnId
-        ? { ...record, settlementStatus: "completed" as const }
-        : record,
-    );
+  const confirmSettlement = async (returnId: string) => {
     try {
-      window.localStorage.setItem(
-        RETURNS_STORAGE_KEY,
-        JSON.stringify(updatedRecords),
+      const latestRecords = (await api.getReturns()) as ReturnRecord[];
+      const target = latestRecords.find(
+        (record) => record.returnId === returnId,
       );
+      if (!target) {
+        window.alert(
+          "سجل المرتجع غير موجود في قاعدة البيانات. حدّث الصفحة وحاول مرة أخرى.",
+        );
+        return;
+      }
+      const due = customerAmountDue(target);
+      if (due <= 0) {
+        window.alert(
+          "لا يوجد مبلغ منفصل مستحق للعميل؛ قيمة المرتجع تمت تسويتها مع المديونية.",
+        );
+        return;
+      }
+      if (settlementState(target) === "completed") return;
+      const channel =
+        target.settlementMethod === "store_credit"
+          ? "إصدار رصيد العميل"
+          : target.settlementMethod === "cash_refund"
+            ? "رد المبلغ نقدًا"
+            : "تسوية المبلغ المستحق للعميل";
+      const confirmed = window.confirm(
+        `هل تم تنفيذ ${channel} بمبلغ ${money(due)} بالفعل؟\n\nسيتم تحديث حالة التسوية في سجل المرتجع فقط. لن يتم إنشاء حركة خزنة أو رصيد متجر منفصل تلقائيًا.`,
+      );
+      if (!confirmed) return;
+      await api.confirmReturnSettlement(returnId);
+      const updatedRecords = (await api.getReturns()) as ReturnRecord[];
       setReturns(updatedRecords);
       setSelectedReturn((current) =>
         current?.returnId === returnId
-          ? { ...current, settlementStatus: "completed" }
+          ? (updatedRecords.find((record) => record.returnId === returnId) ?? {
+              ...current,
+              settlementStatus: "completed",
+            })
           : current,
       );
-    } catch {
+    } catch (error) {
       window.alert(
-        "تعذر حفظ حالة التسوية. تأكد أن التخزين المحلي متاح وحاول مرة أخرى.",
+        error instanceof Error
+          ? error.message
+          : "تعذر حفظ حالة التسوية في قاعدة البيانات.",
       );
     }
   };

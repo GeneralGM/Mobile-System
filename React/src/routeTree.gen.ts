@@ -8,444 +8,213 @@
 // You should NOT make any changes in this file as it will be overwritten.
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
-import { Route as rootRouteImport } from "./routes/__root";
-import { Route as WarehouseRouteImport } from "./routes/warehouse";
-import { Route as SettingsRouteImport } from "./routes/settings";
-import { Route as SalesRouteImport } from "./routes/sales";
-import { Route as RolesRouteImport } from "./routes/roles";
-import { Route as ReturnsHistoryRouteImport } from "./routes/returns-history";
-import { Route as ReturnsRouteImport } from "./routes/returns";
-import { Route as ReportsRouteImport } from "./routes/reports";
-import { Route as PrintersSettingsRouteImport } from "./routes/printers-settings";
-import { Route as OrdersRouteImport } from "./routes/orders";
-import { Route as IssueRouteImport } from "./routes/issue";
-import { Route as InvoicesRouteImport } from "./routes/invoices";
-import { Route as InventoryRouteImport } from "./routes/inventory";
-import { Route as InstalllmentsRouteImport } from "./routes/installlments";
-import { Route as HistoryRouteImport } from "./routes/history";
-import { Route as EntryRouteImport } from "./routes/entry";
-import { Route as CostControlRouteImport } from "./routes/cost-control";
-import { Route as BackupRouteImport } from "./routes/backup";
-import { Route as DashboardRouteImport } from "./routes/Dashboard";
-import { Route as IndexRouteImport } from "./routes/index";
+import { Route as rootRouteImport } from './routes/__root'
+import { Route as WarehouseRouteImport } from './routes/warehouse'
+import { Route as SalesRouteImport } from './routes/sales'
+import { Route as ReturnsHistoryRouteImport } from './routes/returns-history'
+import { Route as ReturnsRouteImport } from './routes/returns'
+import { Route as InvoicesRouteImport } from './routes/invoices'
+import { Route as InstalllmentsRouteImport } from './routes/installlments'
+import { Route as BackupRouteImport } from './routes/backup'
+import { Route as IndexRouteImport } from './routes/index'
 
 const WarehouseRoute = WarehouseRouteImport.update({
-  id: "/warehouse",
-  path: "/warehouse",
+  id: '/warehouse',
+  path: '/warehouse',
   getParentRoute: () => rootRouteImport,
-} as any);
-const SettingsRoute = SettingsRouteImport.update({
-  id: "/settings",
-  path: "/settings",
-  getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const SalesRoute = SalesRouteImport.update({
-  id: "/sales",
-  path: "/sales",
+  id: '/sales',
+  path: '/sales',
   getParentRoute: () => rootRouteImport,
-} as any);
-const RolesRoute = RolesRouteImport.update({
-  id: "/roles",
-  path: "/roles",
-  getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const ReturnsHistoryRoute = ReturnsHistoryRouteImport.update({
-  id: "/returns-history",
-  path: "/returns-history",
+  id: '/returns-history',
+  path: '/returns-history',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const ReturnsRoute = ReturnsRouteImport.update({
-  id: "/returns",
-  path: "/returns",
+  id: '/returns',
+  path: '/returns',
   getParentRoute: () => rootRouteImport,
-} as any);
-const ReportsRoute = ReportsRouteImport.update({
-  id: "/reports",
-  path: "/reports",
-  getParentRoute: () => rootRouteImport,
-} as any);
-const PrintersSettingsRoute = PrintersSettingsRouteImport.update({
-  id: "/printers-settings",
-  path: "/printers-settings",
-  getParentRoute: () => rootRouteImport,
-} as any);
-const OrdersRoute = OrdersRouteImport.update({
-  id: "/orders",
-  path: "/orders",
-  getParentRoute: () => rootRouteImport,
-} as any);
-const IssueRoute = IssueRouteImport.update({
-  id: "/issue",
-  path: "/issue",
-  getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const InvoicesRoute = InvoicesRouteImport.update({
-  id: "/invoices",
-  path: "/invoices",
+  id: '/invoices',
+  path: '/invoices',
   getParentRoute: () => rootRouteImport,
-} as any);
-const InventoryRoute = InventoryRouteImport.update({
-  id: "/inventory",
-  path: "/inventory",
-  getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const InstalllmentsRoute = InstalllmentsRouteImport.update({
-  id: "/installlments",
-  path: "/installlments",
+  id: '/installlments',
+  path: '/installlments',
   getParentRoute: () => rootRouteImport,
-} as any);
-const HistoryRoute = HistoryRouteImport.update({
-  id: "/history",
-  path: "/history",
-  getParentRoute: () => rootRouteImport,
-} as any);
-const EntryRoute = EntryRouteImport.update({
-  id: "/entry",
-  path: "/entry",
-  getParentRoute: () => rootRouteImport,
-} as any);
-const CostControlRoute = CostControlRouteImport.update({
-  id: "/cost-control",
-  path: "/cost-control",
-  getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const BackupRoute = BackupRouteImport.update({
-  id: "/backup",
-  path: "/backup",
+  id: '/backup',
+  path: '/backup',
   getParentRoute: () => rootRouteImport,
-} as any);
-const DashboardRoute = DashboardRouteImport.update({
-  id: "/Dashboard",
-  path: "/Dashboard",
-  getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 const IndexRoute = IndexRouteImport.update({
-  id: "/",
-  path: "/",
+  id: '/',
+  path: '/',
   getParentRoute: () => rootRouteImport,
-} as any);
+} as any)
 
 export interface FileRoutesByFullPath {
-  "/": typeof IndexRoute;
-  "/Dashboard": typeof DashboardRoute;
-  "/backup": typeof BackupRoute;
-  "/cost-control": typeof CostControlRoute;
-  "/entry": typeof EntryRoute;
-  "/history": typeof HistoryRoute;
-  "/installlments": typeof InstalllmentsRoute;
-  "/inventory": typeof InventoryRoute;
-  "/invoices": typeof InvoicesRoute;
-  "/issue": typeof IssueRoute;
-  "/orders": typeof OrdersRoute;
-  "/printers-settings": typeof PrintersSettingsRoute;
-  "/reports": typeof ReportsRoute;
-  "/returns": typeof ReturnsRoute;
-  "/returns-history": typeof ReturnsHistoryRoute;
-  "/roles": typeof RolesRoute;
-  "/sales": typeof SalesRoute;
-  "/settings": typeof SettingsRoute;
-  "/warehouse": typeof WarehouseRoute;
+  '/': typeof IndexRoute
+  '/backup': typeof BackupRoute
+  '/installlments': typeof InstalllmentsRoute
+  '/invoices': typeof InvoicesRoute
+  '/returns': typeof ReturnsRoute
+  '/returns-history': typeof ReturnsHistoryRoute
+  '/sales': typeof SalesRoute
+  '/warehouse': typeof WarehouseRoute
 }
 export interface FileRoutesByTo {
-  "/": typeof IndexRoute;
-  "/Dashboard": typeof DashboardRoute;
-  "/backup": typeof BackupRoute;
-  "/cost-control": typeof CostControlRoute;
-  "/entry": typeof EntryRoute;
-  "/history": typeof HistoryRoute;
-  "/installlments": typeof InstalllmentsRoute;
-  "/inventory": typeof InventoryRoute;
-  "/invoices": typeof InvoicesRoute;
-  "/issue": typeof IssueRoute;
-  "/orders": typeof OrdersRoute;
-  "/printers-settings": typeof PrintersSettingsRoute;
-  "/reports": typeof ReportsRoute;
-  "/returns": typeof ReturnsRoute;
-  "/returns-history": typeof ReturnsHistoryRoute;
-  "/roles": typeof RolesRoute;
-  "/sales": typeof SalesRoute;
-  "/settings": typeof SettingsRoute;
-  "/warehouse": typeof WarehouseRoute;
+  '/': typeof IndexRoute
+  '/backup': typeof BackupRoute
+  '/installlments': typeof InstalllmentsRoute
+  '/invoices': typeof InvoicesRoute
+  '/returns': typeof ReturnsRoute
+  '/returns-history': typeof ReturnsHistoryRoute
+  '/sales': typeof SalesRoute
+  '/warehouse': typeof WarehouseRoute
 }
 export interface FileRoutesById {
-  __root__: typeof rootRouteImport;
-  "/": typeof IndexRoute;
-  "/Dashboard": typeof DashboardRoute;
-  "/backup": typeof BackupRoute;
-  "/cost-control": typeof CostControlRoute;
-  "/entry": typeof EntryRoute;
-  "/history": typeof HistoryRoute;
-  "/installlments": typeof InstalllmentsRoute;
-  "/inventory": typeof InventoryRoute;
-  "/invoices": typeof InvoicesRoute;
-  "/issue": typeof IssueRoute;
-  "/orders": typeof OrdersRoute;
-  "/printers-settings": typeof PrintersSettingsRoute;
-  "/reports": typeof ReportsRoute;
-  "/returns": typeof ReturnsRoute;
-  "/returns-history": typeof ReturnsHistoryRoute;
-  "/roles": typeof RolesRoute;
-  "/sales": typeof SalesRoute;
-  "/settings": typeof SettingsRoute;
-  "/warehouse": typeof WarehouseRoute;
+  __root__: typeof rootRouteImport
+  '/': typeof IndexRoute
+  '/backup': typeof BackupRoute
+  '/installlments': typeof InstalllmentsRoute
+  '/invoices': typeof InvoicesRoute
+  '/returns': typeof ReturnsRoute
+  '/returns-history': typeof ReturnsHistoryRoute
+  '/sales': typeof SalesRoute
+  '/warehouse': typeof WarehouseRoute
 }
 export interface FileRouteTypes {
-  fileRoutesByFullPath: FileRoutesByFullPath;
+  fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    | "/"
-    | "/Dashboard"
-    | "/backup"
-    | "/cost-control"
-    | "/entry"
-    | "/history"
-    | "/installlments"
-    | "/inventory"
-    | "/invoices"
-    | "/issue"
-    | "/orders"
-    | "/printers-settings"
-    | "/reports"
-    | "/returns"
-    | "/returns-history"
-    | "/roles"
-    | "/sales"
-    | "/settings"
-    | "/warehouse";
-  fileRoutesByTo: FileRoutesByTo;
+    | '/'
+    | '/backup'
+    | '/installlments'
+    | '/invoices'
+    | '/returns'
+    | '/returns-history'
+    | '/sales'
+    | '/warehouse'
+  fileRoutesByTo: FileRoutesByTo
   to:
-    | "/"
-    | "/Dashboard"
-    | "/backup"
-    | "/cost-control"
-    | "/entry"
-    | "/history"
-    | "/installlments"
-    | "/inventory"
-    | "/invoices"
-    | "/issue"
-    | "/orders"
-    | "/printers-settings"
-    | "/reports"
-    | "/returns"
-    | "/returns-history"
-    | "/roles"
-    | "/sales"
-    | "/settings"
-    | "/warehouse";
+    | '/'
+    | '/backup'
+    | '/installlments'
+    | '/invoices'
+    | '/returns'
+    | '/returns-history'
+    | '/sales'
+    | '/warehouse'
   id:
-    | "__root__"
-    | "/"
-    | "/Dashboard"
-    | "/backup"
-    | "/cost-control"
-    | "/entry"
-    | "/history"
-    | "/installlments"
-    | "/inventory"
-    | "/invoices"
-    | "/issue"
-    | "/orders"
-    | "/printers-settings"
-    | "/reports"
-    | "/returns"
-    | "/returns-history"
-    | "/roles"
-    | "/sales"
-    | "/settings"
-    | "/warehouse";
-  fileRoutesById: FileRoutesById;
+    | '__root__'
+    | '/'
+    | '/backup'
+    | '/installlments'
+    | '/invoices'
+    | '/returns'
+    | '/returns-history'
+    | '/sales'
+    | '/warehouse'
+  fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute;
-  DashboardRoute: typeof DashboardRoute;
-  BackupRoute: typeof BackupRoute;
-  CostControlRoute: typeof CostControlRoute;
-  EntryRoute: typeof EntryRoute;
-  HistoryRoute: typeof HistoryRoute;
-  InstalllmentsRoute: typeof InstalllmentsRoute;
-  InventoryRoute: typeof InventoryRoute;
-  InvoicesRoute: typeof InvoicesRoute;
-  IssueRoute: typeof IssueRoute;
-  OrdersRoute: typeof OrdersRoute;
-  PrintersSettingsRoute: typeof PrintersSettingsRoute;
-  ReportsRoute: typeof ReportsRoute;
-  ReturnsRoute: typeof ReturnsRoute;
-  ReturnsHistoryRoute: typeof ReturnsHistoryRoute;
-  RolesRoute: typeof RolesRoute;
-  SalesRoute: typeof SalesRoute;
-  SettingsRoute: typeof SettingsRoute;
-  WarehouseRoute: typeof WarehouseRoute;
+  IndexRoute: typeof IndexRoute
+  BackupRoute: typeof BackupRoute
+  InstalllmentsRoute: typeof InstalllmentsRoute
+  InvoicesRoute: typeof InvoicesRoute
+  ReturnsRoute: typeof ReturnsRoute
+  ReturnsHistoryRoute: typeof ReturnsHistoryRoute
+  SalesRoute: typeof SalesRoute
+  WarehouseRoute: typeof WarehouseRoute
 }
 
-declare module "@tanstack/react-router" {
+declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    "/warehouse": {
-      id: "/warehouse";
-      path: "/warehouse";
-      fullPath: "/warehouse";
-      preLoaderRoute: typeof WarehouseRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/settings": {
-      id: "/settings";
-      path: "/settings";
-      fullPath: "/settings";
-      preLoaderRoute: typeof SettingsRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/sales": {
-      id: "/sales";
-      path: "/sales";
-      fullPath: "/sales";
-      preLoaderRoute: typeof SalesRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/roles": {
-      id: "/roles";
-      path: "/roles";
-      fullPath: "/roles";
-      preLoaderRoute: typeof RolesRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/returns-history": {
-      id: "/returns-history";
-      path: "/returns-history";
-      fullPath: "/returns-history";
-      preLoaderRoute: typeof ReturnsHistoryRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/returns": {
-      id: "/returns";
-      path: "/returns";
-      fullPath: "/returns";
-      preLoaderRoute: typeof ReturnsRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/reports": {
-      id: "/reports";
-      path: "/reports";
-      fullPath: "/reports";
-      preLoaderRoute: typeof ReportsRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/printers-settings": {
-      id: "/printers-settings";
-      path: "/printers-settings";
-      fullPath: "/printers-settings";
-      preLoaderRoute: typeof PrintersSettingsRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/orders": {
-      id: "/orders";
-      path: "/orders";
-      fullPath: "/orders";
-      preLoaderRoute: typeof OrdersRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/issue": {
-      id: "/issue";
-      path: "/issue";
-      fullPath: "/issue";
-      preLoaderRoute: typeof IssueRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/invoices": {
-      id: "/invoices";
-      path: "/invoices";
-      fullPath: "/invoices";
-      preLoaderRoute: typeof InvoicesRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/inventory": {
-      id: "/inventory";
-      path: "/inventory";
-      fullPath: "/inventory";
-      preLoaderRoute: typeof InventoryRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/installlments": {
-      id: "/installlments";
-      path: "/installlments";
-      fullPath: "/installlments";
-      preLoaderRoute: typeof InstalllmentsRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/history": {
-      id: "/history";
-      path: "/history";
-      fullPath: "/history";
-      preLoaderRoute: typeof HistoryRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/entry": {
-      id: "/entry";
-      path: "/entry";
-      fullPath: "/entry";
-      preLoaderRoute: typeof EntryRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/cost-control": {
-      id: "/cost-control";
-      path: "/cost-control";
-      fullPath: "/cost-control";
-      preLoaderRoute: typeof CostControlRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/backup": {
-      id: "/backup";
-      path: "/backup";
-      fullPath: "/backup";
-      preLoaderRoute: typeof BackupRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/Dashboard": {
-      id: "/Dashboard";
-      path: "/Dashboard";
-      fullPath: "/Dashboard";
-      preLoaderRoute: typeof DashboardRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
-    "/": {
-      id: "/";
-      path: "/";
-      fullPath: "/";
-      preLoaderRoute: typeof IndexRouteImport;
-      parentRoute: typeof rootRouteImport;
-    };
+    '/warehouse': {
+      id: '/warehouse'
+      path: '/warehouse'
+      fullPath: '/warehouse'
+      preLoaderRoute: typeof WarehouseRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/sales': {
+      id: '/sales'
+      path: '/sales'
+      fullPath: '/sales'
+      preLoaderRoute: typeof SalesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/returns-history': {
+      id: '/returns-history'
+      path: '/returns-history'
+      fullPath: '/returns-history'
+      preLoaderRoute: typeof ReturnsHistoryRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/returns': {
+      id: '/returns'
+      path: '/returns'
+      fullPath: '/returns'
+      preLoaderRoute: typeof ReturnsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/invoices': {
+      id: '/invoices'
+      path: '/invoices'
+      fullPath: '/invoices'
+      preLoaderRoute: typeof InvoicesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/installlments': {
+      id: '/installlments'
+      path: '/installlments'
+      fullPath: '/installlments'
+      preLoaderRoute: typeof InstalllmentsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/backup': {
+      id: '/backup'
+      path: '/backup'
+      fullPath: '/backup'
+      preLoaderRoute: typeof BackupRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/': {
+      id: '/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof IndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  DashboardRoute: DashboardRoute,
   BackupRoute: BackupRoute,
-  CostControlRoute: CostControlRoute,
-  EntryRoute: EntryRoute,
-  HistoryRoute: HistoryRoute,
   InstalllmentsRoute: InstalllmentsRoute,
-  InventoryRoute: InventoryRoute,
   InvoicesRoute: InvoicesRoute,
-  IssueRoute: IssueRoute,
-  OrdersRoute: OrdersRoute,
-  PrintersSettingsRoute: PrintersSettingsRoute,
-  ReportsRoute: ReportsRoute,
   ReturnsRoute: ReturnsRoute,
   ReturnsHistoryRoute: ReturnsHistoryRoute,
-  RolesRoute: RolesRoute,
   SalesRoute: SalesRoute,
-  SettingsRoute: SettingsRoute,
   WarehouseRoute: WarehouseRoute,
-};
+}
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
-  ._addFileTypes<FileRouteTypes>();
+  ._addFileTypes<FileRouteTypes>()
 
-import type { getRouter } from "./router.tsx";
-import type { startInstance } from "./start.ts";
-declare module "@tanstack/react-start" {
+import type { getRouter } from './router.tsx'
+import type { startInstance } from './start.ts'
+declare module '@tanstack/react-start' {
   interface Register {
-    ssr: true;
-    router: Awaited<ReturnType<typeof getRouter>>;
-    config: Awaited<ReturnType<typeof startInstance.getOptions>>;
+    ssr: true
+    router: Awaited<ReturnType<typeof getRouter>>
+    config: Awaited<ReturnType<typeof startInstance.getOptions>>
   }
 }

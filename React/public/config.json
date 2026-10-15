@@ -1,4 +1,4 @@
 {
-  "SERVER_IP": "localhost",
+  "API_BASE_URL": "http://localhost:5000",
   "SERVER_PORT": 5000
 }

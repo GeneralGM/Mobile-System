@@ -1,0 +1,2094 @@
+import express from "express";
+import cors from "cors";
+import pg from "pg";
+import dotenv from "dotenv";
+import crypto from "node:crypto";
+import fs from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import path from "node:path";
+
+dotenv.config();
+const { Pool } = pg;
+const app = express();
+const PORT = Number(process.env.PORT || 5000);
+const HOST = process.env.HOST || "0.0.0.0";
+const API_TOKEN = String(process.env.API_TOKEN || "").trim();
+
+const pool = new Pool({
+  user: process.env.DB_USER || "mobile_store_app",
+  host: process.env.DB_HOST || "127.0.0.1",
+  database: process.env.DB_DATABASE || "mobile_store_db",
+  password: process.env.DB_PASSWORD || "",
+  port: Number(process.env.DB_PORT || 5432),
+  options: "-c timezone=Africa/Cairo",
+  max: 10,
+  idleTimeoutMillis: 10000,
+  connectionTimeoutMillis: 5000,
+  application_name: "mobile-system-api",
+});
+
+app.use(cors());
+app.use(express.json({ limit: "10mb" }));
+app.use((req, res, next) => {
+  if (!req.path.startsWith("/api/") || req.path === "/api/health" || !API_TOKEN)
+    return next();
+  const header = String(req.headers.authorization || "");
+  const supplied = header.startsWith("Bearer ") ? header.slice(7).trim() : "";
+  const a = Buffer.from(supplied);
+  const b = Buffer.from(API_TOKEN);
+  if (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {
+    return res
+      .status(401)
+      .json({ error: "غير مصرح بالوصول إلى API. راجع API_TOKEN." });
+  }
+  next();
+});
+
+const newId = (prefix = "") => `${prefix}${crypto.randomUUID()}`;
+const nowMs = () => Date.now();
+const asText = (value, fallback = "") =>
+  value == null ? fallback : String(value).trim();
+const asNumber = (value, fallback = 0) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? n : fallback;
+};
+const money = (value) =>
+  Math.round((asNumber(value) + Number.EPSILON) * 100) / 100;
+const keyText = (value) =>
+  asText(value).normalize("NFKC").toLocaleLowerCase("en-US");
+const validEnum = (value, choices, field) => {
+  if (!choices.includes(value))
+    throw httpError(400, `قيمة ${field} غير صحيحة.`);
+  return value;
+};
+function httpError(status, message) {
+  const error = new Error(message);
+  error.status = status;
+  return error;
+}
+async function transaction(fn) {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (error) {
+    try {
+      await client.query("ROLLBACK");
+    } catch {
+      /* preserve original error */
+    }
+    throw error;
+  } finally {
+    client.release();
+  }
+}
+
+function normalizeBrandInput(input) {
+  const name = asText(input?.name || input?.brand);
+  if (!name) throw httpError(400, "اسم الماركة مطلوب.");
+  const rawSeries = Array.isArray(input?.series) ? input.series : [];
+  const series = rawSeries.flatMap((entry) => {
+    if (typeof entry === "string")
+      return entry.trim() ? [{ name: entry.trim(), models: [] }] : [];
+    if (!entry || typeof entry !== "object") return [];
+    const sName = asText(entry.name);
+    if (!sName) return [];
+    const models = Array.isArray(entry.models)
+      ? entry.models
+          .map((v) =>
+            typeof v === "object" ? asText(v?.name || v?.model) : asText(v),
+          )
+          .filter(Boolean)
+      : [];
+    return [{ name: sName, models }];
+  });
+  const oldModels = Array.isArray(input?.models)
+    ? input.models
+        .map((v) =>
+          typeof v === "object" ? asText(v?.name || v?.model) : asText(v),
+        )
+        .filter(Boolean)
+    : [];
+  if (oldModels.length) {
+    const general = series.find((s) => keyText(s.name) === keyText("عام"));
+    if (general)
+      general.models = [...new Set([...general.models, ...oldModels])];
+    else series.push({ name: "عام", models: oldModels });
+  }
+  if (!series.length) series.push({ name: "عام", models: [] });
+  return { id: asText(input?.id) || newId("brand-"), name, series };
+}
+
+async function ensureBrand(client, id, name) {
+  const cleanName = asText(name);
+  if (!cleanName) throw httpError(400, "اسم الماركة مطلوب.");
+  const cleanId = asText(id);
+  if (cleanId) {
+    const byId = await client.query("SELECT id FROM brands WHERE id=$1", [
+      cleanId,
+    ]);
+    if (byId.rowCount) {
+      const updated = await client.query(
+        "UPDATE brands SET name=$2,name_key=$3 WHERE id=$1 RETURNING id,name",
+        [cleanId, cleanName, keyText(cleanName)],
+      );
+      return updated.rows[0];
+    }
+  }
+  const result = await client.query(
+    `INSERT INTO brands(id, name, name_key) VALUES($1,$2,$3)
+     ON CONFLICT(name_key) DO UPDATE SET name = EXCLUDED.name
+     RETURNING id, name`,
+    [cleanId || newId("brand-"), cleanName, keyText(cleanName)],
+  );
+  return result.rows[0];
+}
+async function ensureSeries(client, brandId, name, preferredId = "") {
+  const cleanName = asText(name) || "عام";
+  const result = await client.query(
+    `INSERT INTO brand_series(id, brand_id, name, name_key) VALUES($1,$2,$3,$4)
+     ON CONFLICT(brand_id, name_key) DO UPDATE SET name = EXCLUDED.name
+     RETURNING id, name`,
+    [
+      asText(preferredId) || newId("series-"),
+      brandId,
+      cleanName,
+      keyText(cleanName),
+    ],
+  );
+  return result.rows[0];
+}
+async function ensureModel(client, brandId, seriesId, name) {
+  const cleanName = asText(name);
+  if (!cleanName) throw httpError(400, "اسم الموديل مطلوب.");
+  const result = await client.query(
+    `INSERT INTO brand_models(id, brand_id, series_id, name, name_key) VALUES($1,$2,$3,$4,$5)
+     ON CONFLICT(series_id, name_key) DO UPDATE SET name = EXCLUDED.name
+     RETURNING id, name`,
+    [newId("model-"), brandId, seriesId, cleanName, keyText(cleanName)],
+  );
+  return result.rows[0];
+}
+async function saveBrandObject(client, input) {
+  const value = normalizeBrandInput(input);
+  const brand = await ensureBrand(client, value.id, value.name);
+  for (const seriesData of value.series) {
+    const series = await ensureSeries(client, brand.id, seriesData.name);
+    for (const modelName of [...new Set(seriesData.models)]) {
+      await ensureModel(client, brand.id, series.id, modelName);
+    }
+  }
+  return brand;
+}
+async function getBrands(client = pool) {
+  const [brandRows, seriesRows, modelRows] = await Promise.all([
+    client.query("SELECT id, name FROM brands ORDER BY name"),
+    client.query("SELECT id, brand_id, name FROM brand_series ORDER BY name"),
+    client.query(
+      "SELECT brand_id, series_id, name FROM brand_models ORDER BY name",
+    ),
+  ]);
+  return brandRows.rows.map((brand) => {
+    const series = seriesRows.rows
+      .filter((row) => row.brand_id === brand.id)
+      .map((row) => ({
+        name: row.name,
+        models: modelRows.rows
+          .filter((model) => model.series_id === row.id)
+          .map((model) => model.name),
+      }));
+    const models = [...new Set(series.flatMap((item) => item.models))];
+    return { id: brand.id, name: brand.name, models, series };
+  });
+}
+async function resolveCatalog(client, brandName, seriesName, modelName) {
+  const brand = await ensureBrand(client, "", brandName);
+  const series = await ensureSeries(client, brand.id, seriesName || "عام");
+  const model = await ensureModel(client, brand.id, series.id, modelName);
+  return { brandId: brand.id, seriesId: series.id, modelId: model.id };
+}
+async function ensureOffer(client, input) {
+  if (!input || typeof input !== "object") return null;
+  const name = asText(input.name);
+  if (!name) return null;
+  const id = asText(input.id) || newId("offer-");
+  const discountType = validEnum(
+    asText(input.discountType),
+    ["percent", "fixed"],
+    "نوع الخصم",
+  );
+  const discountValue = money(asNumber(input.discountValue, NaN));
+  const durationDays = Number(input.durationDays);
+  const expiresAt = Number(input.expiresAt);
+  if (
+    !Number.isFinite(discountValue) ||
+    discountValue < 0 ||
+    !Number.isInteger(durationDays) ||
+    durationDays < 0 ||
+    !Number.isFinite(expiresAt)
+  )
+    throw httpError(400, "بيانات العرض غير صحيحة.");
+  const found = await client.query("SELECT id FROM offers WHERE id=$1", [id]);
+  if (found.rowCount) {
+    const updated = await client.query(
+      "UPDATE offers SET name=$2,name_key=$3,discount_type=$4,discount_value=$5,duration_days=$6,expires_at=$7 WHERE id=$1 RETURNING id",
+      [
+        id,
+        name,
+        keyText(name),
+        discountType,
+        discountValue,
+        durationDays,
+        expiresAt,
+      ],
+    );
+    return updated.rows[0].id;
+  }
+  const inserted = await client.query(
+    `INSERT INTO offers(id,name,name_key,discount_type,discount_value,duration_days,expires_at) VALUES($1,$2,$3,$4,$5,$6,$7)
+     ON CONFLICT(name_key) DO UPDATE SET discount_type=EXCLUDED.discount_type,discount_value=EXCLUDED.discount_value,duration_days=EXCLUDED.duration_days,expires_at=EXCLUDED.expires_at RETURNING id`,
+    [
+      id,
+      name,
+      keyText(name),
+      discountType,
+      discountValue,
+      durationDays,
+      expiresAt,
+    ],
+  );
+  return inserted.rows[0].id;
+}
+async function createDevice(client, input, { importMode = false } = {}) {
+  const id = asText(input?.id) || newId("device-");
+  const imei = asText(input?.imei);
+  const brandName = asText(input?.brand);
+  const seriesName = asText(input?.series) || "عام";
+  const modelName = asText(input?.model);
+  if (!imei || !brandName || !modelName)
+    throw httpError(400, "IMEI والماركة والموديل مطلوبون.");
+  const existing = await client.query(
+    "SELECT id,warehouse_batch_id,status,created_at FROM devices WHERE imei_key=$1",
+    [keyText(imei)],
+  );
+  if (existing.rowCount && !importMode)
+    throw httpError(409, "رقم IMEI مسجل بالفعل.");
+  const catalog = await resolveCatalog(
+    client,
+    brandName,
+    seriesName,
+    modelName,
+  );
+  const offerId = input?.offer ? await ensureOffer(client, input.offer) : null;
+  const batchId = asText(input?.warehouseBatchId) || null;
+  let validBatchId = batchId;
+  if (batchId) {
+    const batch = await client.query(
+      "SELECT id FROM warehouse_batches WHERE id=$1",
+      [batchId],
+    );
+    if (!batch.rowCount) {
+      if (importMode) validBatchId = null;
+      else throw httpError(400, "دفعة المخزون المحددة غير موجودة.");
+    }
+  }
+  const status = validEnum(
+    asText(input?.status, existing.rows[0]?.status || "available"),
+    ["available", "sold", "reserved"],
+    "حالة الجهاز",
+  );
+  const createdAt =
+    Number(input?.createdAt) || Number(existing.rows[0]?.created_at) || nowMs();
+  const unitCost = money(asNumber(input?.unitCost));
+  const salePrice = money(asNumber(input?.salePrice));
+  const installmentPrice = money(asNumber(input?.installmentPrice, salePrice));
+  if (existing.rowCount && importMode) {
+    const currentId = existing.rows[0].id;
+    const linkedBatchId =
+      batchId === null ? existing.rows[0].warehouse_batch_id : validBatchId;
+    await client.query(
+      `UPDATE devices SET brand_id=$2,series_id=$3,model_id=$4,color=$5,ram=$6,storage=$7,sale_price=$8,installment_price=$9,offer_id=$10,status=$11,created_at=$12,warehouse_batch_id=$13,unit_cost=$14 WHERE id=$1`,
+      [
+        currentId,
+        catalog.brandId,
+        catalog.seriesId,
+        catalog.modelId,
+        asText(input?.color),
+        asText(input?.ram),
+        asText(input?.storage),
+        salePrice,
+        installmentPrice,
+        offerId,
+        status,
+        createdAt,
+        linkedBatchId,
+        unitCost,
+      ],
+    );
+    return currentId;
+  }
+  const insertSql = `INSERT INTO devices(id,imei,imei_key,brand_id,series_id,model_id,color,ram,storage,sale_price,installment_price,offer_id,status,created_at,warehouse_batch_id,unit_cost)
+    VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ${importMode ? "ON CONFLICT DO NOTHING" : ""} RETURNING id`;
+  const result = await client.query(insertSql, [
+    id,
+    imei,
+    keyText(imei),
+    catalog.brandId,
+    catalog.seriesId,
+    catalog.modelId,
+    asText(input?.color),
+    asText(input?.ram),
+    asText(input?.storage),
+    salePrice,
+    installmentPrice,
+    offerId,
+    status,
+    createdAt,
+    validBatchId,
+    unitCost,
+  ]);
+  if (result.rowCount) return result.rows[0].id;
+  const byImei = await client.query(
+    "SELECT id FROM devices WHERE imei_key=$1",
+    [keyText(imei)],
+  );
+  return byImei.rowCount ? byImei.rows[0].id : id;
+}
+async function fetchDevice(id, client = pool) {
+  const result = await client.query(
+    `SELECT d.*,b.name AS brand,bs.name AS series,bm.name AS model,o.name AS offer_name,o.discount_type,o.discount_value,o.duration_days,o.expires_at
+     FROM devices d JOIN brands b ON b.id=d.brand_id JOIN brand_series bs ON bs.id=d.series_id JOIN brand_models bm ON bm.id=d.model_id LEFT JOIN offers o ON o.id=d.offer_id WHERE d.id=$1`,
+    [id],
+  );
+  if (!result.rowCount) return null;
+  const r = result.rows[0];
+  return {
+    id: r.id,
+    imei: r.imei,
+    brand: r.brand,
+    series: r.series,
+    model: r.model,
+    color: r.color,
+    ram: r.ram,
+    storage: r.storage,
+    salePrice: Number(r.sale_price),
+    installmentPrice: Number(r.installment_price),
+    offer: r.offer_name
+      ? {
+          name: r.offer_name,
+          discountType: r.discount_type,
+          discountValue: Number(r.discount_value),
+          durationDays: Number(r.duration_days),
+          expiresAt: Number(r.expires_at),
+        }
+      : null,
+    status: r.status,
+    createdAt: Number(r.created_at),
+    warehouseBatchId: r.warehouse_batch_id || undefined,
+    unitCost: Number(r.unit_cost),
+  };
+}
+
+const BATCH_SELECT = `
+  SELECT wb.id, b.name AS brand, bs.name AS series, bm.name AS model,
+         wb.received_quantity, wb.available_quantity, wb.unit_cost, wb.sale_price,
+         wb.supplier_name, wb.received_at,
+         COALESCE((SELECT json_agg(d.imei ORDER BY d.created_at,d.id) FROM devices d WHERE d.warehouse_batch_id=wb.id), '[]'::json) AS imeis
+  FROM warehouse_batches wb
+  JOIN brands b ON b.id=wb.brand_id
+  JOIN brand_series bs ON bs.id=wb.series_id
+  JOIN brand_models bm ON bm.id=wb.model_id`;
+function serializeBatch(row) {
+  return {
+    id: row.id,
+    brand: row.brand,
+    series: row.series || "عام",
+    model: row.model,
+    receivedQuantity: Number(row.received_quantity),
+    availableQuantity: Number(row.available_quantity),
+    unitCost: Number(row.unit_cost),
+    salePrice: Number(row.sale_price),
+    supplierName: row.supplier_name || "",
+    receivedAt: Number(row.received_at),
+    imeis: Array.isArray(row.imeis) ? row.imeis.map(String) : [],
+  };
+}
+async function createBatch(client, input, { importMode = false } = {}) {
+  const id = asText(input?.id) || newId("batch-");
+  const brandName = asText(input?.brand);
+  const seriesName = asText(input?.series, "عام") || "عام";
+  const modelName = asText(input?.model);
+  const quantity = Number(input?.receivedQuantity);
+  const available = importMode
+    ? Number(input?.availableQuantity ?? quantity)
+    : quantity;
+  const cost = Number(input?.unitCost);
+  const price = Number(input?.salePrice);
+  const imeis = Array.isArray(input?.imeis)
+    ? input.imeis.map((v) => asText(v)).filter(Boolean)
+    : [];
+  if (!brandName || !modelName)
+    throw httpError(400, "الماركة والموديل مطلوبان لدفعة المخزون.");
+  if (
+    !Number.isInteger(quantity) ||
+    quantity < 1 ||
+    !Number.isInteger(available) ||
+    available < 0 ||
+    available > quantity
+  )
+    throw httpError(400, "كمية المخزون غير صحيحة.");
+  if (
+    !Number.isFinite(cost) ||
+    cost < 0 ||
+    !Number.isFinite(price) ||
+    price < 0
+  )
+    throw httpError(400, "التكلفة وسعر البيع يجب أن يكونا أرقامًا غير سالبة.");
+  if (imeis.length > quantity)
+    throw httpError(400, "عدد أرقام IMEI أكبر من كمية الدفعة.");
+  if (new Set(imeis.map(keyText)).size !== imeis.length)
+    throw httpError(400, "يوجد رقم IMEI مكرر داخل الدفعة.");
+  if (!importMode && imeis.length) {
+    const duplicate = await client.query(
+      "SELECT imei FROM devices WHERE imei_key=ANY($1::text[]) LIMIT 1",
+      [imeis.map(keyText)],
+    );
+    if (duplicate.rowCount)
+      throw httpError(409, `رقم IMEI مسجل بالفعل: ${duplicate.rows[0].imei}`);
+  }
+  const catalog = await resolveCatalog(
+    client,
+    brandName,
+    seriesName,
+    modelName,
+  );
+  const receivedAt = Number.isFinite(Number(input?.receivedAt))
+    ? Number(input.receivedAt)
+    : nowMs();
+  const inserted = await client.query(
+    `INSERT INTO warehouse_batches(id,brand_id,series_id,model_id,received_quantity,available_quantity,unit_cost,sale_price,supplier_name,received_at)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
+     ON CONFLICT(id) DO NOTHING RETURNING id`,
+    [
+      id,
+      catalog.brandId,
+      catalog.seriesId,
+      catalog.modelId,
+      quantity,
+      available,
+      money(cost),
+      money(price),
+      asText(input?.supplierName),
+      receivedAt,
+    ],
+  );
+  if (!inserted.rowCount) return id;
+  for (const imei of imeis) {
+    await client.query(
+      `INSERT INTO devices(id,imei,imei_key,brand_id,series_id,model_id,color,ram,storage,sale_price,installment_price,status,created_at,warehouse_batch_id,unit_cost)
+       VALUES($1,$2,$3,$4,$5,$6,'','','',$7,$7,'available',$8,$9,$10) ON CONFLICT(imei_key) DO NOTHING`,
+      [
+        newId("device-"),
+        imei,
+        keyText(imei),
+        catalog.brandId,
+        catalog.seriesId,
+        catalog.modelId,
+        money(price),
+        nowMs(),
+        id,
+        money(cost),
+      ],
+    );
+  }
+  return id;
+}
+async function getBatch(id, client = pool) {
+  const result = await client.query(`${BATCH_SELECT} WHERE wb.id=$1`, [id]);
+  return result.rows[0] ? serializeBatch(result.rows[0]) : null;
+}
+async function listBatches(client = pool) {
+  const result = await client.query(
+    `${BATCH_SELECT} ORDER BY wb.received_at DESC, wb.id`,
+  );
+  return result.rows.map(serializeBatch);
+}
+
+async function upsertCustomer(client, name, phone) {
+  const cleanName = asText(name) || "عميل نقدي";
+  const cleanPhone = asText(phone);
+  if (!cleanPhone && keyText(cleanName) === keyText("عميل نقدي")) return null;
+  const phoneKey = cleanPhone
+    ? keyText(cleanPhone).replace(/[\s()-]/g, "")
+    : null;
+  if (phoneKey) {
+    const found = await client.query(
+      "SELECT id FROM customers WHERE phone_key=$1",
+      [phoneKey],
+    );
+    if (found.rowCount) {
+      const updated = await client.query(
+        "UPDATE customers SET name=$2, phone=$3, updated_at=$4 WHERE id=$1 RETURNING id",
+        [found.rows[0].id, cleanName, cleanPhone, nowMs()],
+      );
+      return updated.rows[0].id;
+    }
+  }
+  const id = newId("customer-");
+  const result = await client.query(
+    `INSERT INTO customers(id,name,phone,phone_key) VALUES($1,$2,$3,$4)
+     ON CONFLICT(id) DO UPDATE SET name=EXCLUDED.name, phone=EXCLUDED.phone
+     RETURNING id`,
+    [id, cleanName, cleanPhone, phoneKey],
+  );
+  return result.rows[0].id;
+}
+
+function serializeSaleItem(row) {
+  return {
+    deviceId: row.id,
+    brand: row.brand,
+    series: row.series,
+    model: row.model,
+    color: row.color,
+    ram: row.ram,
+    storage: row.storage,
+    originalPrice: Number(row.original_price),
+    cashPrice: Number(row.cash_price),
+    installmentPrice: Number(row.installment_price),
+    cashFinalPrice: Number(row.cash_final_price),
+    installmentFinalPrice: Number(row.installment_final_price),
+    finalPrice: Number(row.final_price),
+    offerName: row.offer_name,
+    quantity: Number(row.quantity),
+    warehouseBatchId: row.warehouse_batch_id || undefined,
+    unitCost: Number(row.unit_cost),
+    isNewStock: Boolean(row.is_new_stock),
+    returnedQuantity: Number(row.returned_quantity || 0),
+  };
+}
+function serializeInstallment(row) {
+  return {
+    number: Number(row.installment_number),
+    amount: Number(row.amount),
+    dueDate:
+      typeof row.due_date === "string"
+        ? row.due_date.slice(0, 10)
+        : new Date(row.due_date).toISOString().slice(0, 10),
+    paid: Boolean(row.paid),
+    paidAmount: Number(row.paid_amount),
+  };
+}
+async function fetchSales(
+  { id = null, query = "", limit = 1000 } = {},
+  client = pool,
+) {
+  const filters = [];
+  const params = [];
+  if (id) {
+    params.push(id);
+    filters.push(`s.id=$${params.length}`);
+  }
+  if (query) {
+    params.push(`%${query}%`);
+    const p = `$${params.length}`;
+    filters.push(
+      `(s.invoice_number ILIKE ${p} OR s.customer_name ILIKE ${p} OR s.customer_phone ILIKE ${p} OR EXISTS (SELECT 1 FROM sale_items sx WHERE sx.sale_id=s.id AND (sx.brand ILIKE ${p} OR sx.model ILIKE ${p})))`,
+    );
+  }
+  params.push(Math.max(1, Math.min(5000, Number(limit) || 1000)));
+  const where = filters.length ? `WHERE ${filters.join(" AND ")}` : "";
+  const salesRes = await client.query(
+    `SELECT s.* FROM sales s ${where} ORDER BY s.created_at DESC, s.invoice_number DESC LIMIT $${params.length}`,
+    params,
+  );
+  if (!salesRes.rowCount) return id ? null : [];
+  const ids = salesRes.rows.map((row) => row.id);
+  const [itemsRes, installmentsRes] = await Promise.all([
+    client.query(
+      `SELECT si.*, COALESCE((SELECT SUM(r.quantity_returned) FROM returns r WHERE r.sale_item_id=si.id),0) AS returned_quantity
+       FROM sale_items si WHERE si.sale_id=ANY($1::text[]) ORDER BY si.sale_id,si.line_number`,
+      [ids],
+    ),
+    client.query(
+      "SELECT * FROM sale_installments WHERE sale_id=ANY($1::text[]) ORDER BY sale_id,installment_number",
+      [ids],
+    ),
+  ]);
+  const itemsBySale = new Map();
+  for (const row of itemsRes.rows) {
+    if (!itemsBySale.has(row.sale_id)) itemsBySale.set(row.sale_id, []);
+    itemsBySale.get(row.sale_id).push(serializeSaleItem(row));
+  }
+  const installmentsBySale = new Map();
+  for (const row of installmentsRes.rows) {
+    if (!installmentsBySale.has(row.sale_id))
+      installmentsBySale.set(row.sale_id, []);
+    installmentsBySale.get(row.sale_id).push(serializeInstallment(row));
+  }
+  const mapped = salesRes.rows.map((row) => ({
+    id: row.id,
+    invoiceNumber: row.invoice_number,
+    createdAt: Number(row.created_at),
+    items: itemsBySale.get(row.id) || [],
+    customerName: row.customer_name,
+    customerPhone: row.customer_phone,
+    paymentMethod: row.payment_method,
+    total: Number(row.total),
+    amountPaid: Number(row.amount_paid),
+    remainingAmount: Number(row.remaining_amount),
+    returnBalanceReduced: Number(row.return_balance_reduced),
+    originalInstallmentAmount:
+      row.original_installment_amount == null
+        ? undefined
+        : Number(row.original_installment_amount),
+    installmentsCount: Number(row.installments_count),
+    installments: installmentsBySale.get(row.id) || [],
+    notes: row.notes || "",
+    status: row.status,
+  }));
+  return id ? mapped[0] || null : mapped;
+}
+
+async function createSale(
+  client,
+  input,
+  { importMode = false, updateStock = true } = {},
+) {
+  const id = asText(input?.id) || newId("sale-");
+  const invoiceNumber =
+    asText(input?.invoiceNumber) ||
+    `INV-${new Date().toISOString().slice(0, 10).replaceAll("-", "")}-${crypto.randomInt(10000, 99999)}`;
+  const paymentMethod = validEnum(
+    asText(input?.paymentMethod),
+    ["cash", "credit", "installment"],
+    "طريقة الدفع",
+  );
+  const items = Array.isArray(input?.items) ? input.items : [];
+  if (!items.length)
+    throw httpError(400, "الفاتورة لازم تحتوي على بند واحد على الأقل.");
+  const customerName = asText(input?.customerName) || "عميل نقدي";
+  const customerPhone = asText(input?.customerPhone);
+  const customerId = await upsertCustomer(client, customerName, customerPhone);
+  let calculatedTotal = 0;
+  const normalizedItems = items.map((item, index) => {
+    const quantity = Number(item?.quantity);
+    if (!Number.isInteger(quantity) || quantity < 1)
+      throw httpError(400, `كمية البند رقم ${index + 1} غير صحيحة.`);
+    const cashFinal = money(
+      asNumber(
+        item?.cashFinalPrice,
+        asNumber(item?.finalPrice, asNumber(item?.cashPrice)),
+      ),
+    );
+    const installmentFinal = money(
+      asNumber(
+        item?.installmentFinalPrice,
+        asNumber(item?.finalPrice, asNumber(item?.installmentPrice)),
+      ),
+    );
+    const chosenPrice =
+      paymentMethod === "installment" ? installmentFinal : cashFinal;
+    if (chosenPrice < 0 || !Number.isFinite(chosenPrice))
+      throw httpError(400, "سعر أحد البنود غير صحيح.");
+    calculatedTotal += chosenPrice * quantity;
+    return {
+      id: asText(item?.deviceId) || newId("sale-item-"),
+      lineNumber: index,
+      brand: asText(item?.brand),
+      series: asText(item?.series) || "عام",
+      model: asText(item?.model),
+      color: asText(item?.color),
+      ram: asText(item?.ram),
+      storage: asText(item?.storage),
+      originalPrice: money(asNumber(item?.originalPrice)),
+      cashPrice: money(asNumber(item?.cashPrice, cashFinal)),
+      installmentPrice: money(
+        asNumber(item?.installmentPrice, installmentFinal),
+      ),
+      cashFinalPrice: cashFinal,
+      installmentFinalPrice: installmentFinal,
+      finalPrice: money(asNumber(item?.finalPrice, chosenPrice)),
+      offerName: asText(item?.offerName),
+      quantity,
+      batchId: asText(item?.warehouseBatchId) || null,
+      unitCost: money(asNumber(item?.unitCost)),
+      isNewStock: Boolean(item?.isNewStock),
+      chosenPrice,
+    };
+  });
+  calculatedTotal = money(calculatedTotal);
+  const createdAt = Number.isFinite(Number(input?.createdAt))
+    ? Number(input.createdAt)
+    : nowMs();
+  const requestedPaid =
+    input?.amountPaid == null
+      ? paymentMethod === "cash"
+        ? calculatedTotal
+        : 0
+      : money(Number(input.amountPaid));
+  if (requestedPaid < 0 || requestedPaid > calculatedTotal + 0.01)
+    throw httpError(400, "المبلغ المدفوع أكبر من إجمالي الفاتورة أو غير صحيح.");
+  const amountPaid = Math.min(calculatedTotal, requestedPaid);
+  const remainingAmount = money(Math.max(0, calculatedTotal - amountPaid));
+  const installments =
+    paymentMethod === "installment" && Array.isArray(input?.installments)
+      ? input.installments
+      : [];
+  if (
+    paymentMethod === "installment" &&
+    remainingAmount > 0 &&
+    installments.length === 0
+  )
+    throw httpError(400, "جدول الأقساط مطلوب لفاتورة التقسيط.");
+  const installmentCount =
+    paymentMethod === "installment"
+      ? Number(input?.installmentsCount) || installments.length
+      : 0;
+  let originalInstallmentAmount = asNumber(input?.originalInstallmentAmount, 0);
+  if (!originalInstallmentAmount && installments.length) {
+    const counts = new Map();
+    for (const row of installments) {
+      const amount = money(asNumber(row?.amount));
+      if (amount > 0) counts.set(amount, (counts.get(amount) || 0) + 1);
+    }
+    if (counts.size)
+      originalInstallmentAmount = [...counts.entries()].sort(
+        (a, b) => b[1] - a[1] || b[0] - a[0],
+      )[0][0];
+  }
+  const status =
+    remainingAmount <= 0 ? "paid" : amountPaid > 0 ? "partial" : "unpaid";
+
+  const inserted = await client.query(
+    `INSERT INTO sales(id,invoice_number,created_at,customer_id,customer_name,customer_phone,payment_method,total,amount_paid,remaining_amount,return_balance_reduced,original_installment_amount,installments_count,notes,status)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(id) DO NOTHING RETURNING id`,
+    [
+      id,
+      invoiceNumber,
+      createdAt,
+      customerId,
+      customerName,
+      customerPhone,
+      paymentMethod,
+      calculatedTotal,
+      amountPaid,
+      remainingAmount,
+      money(asNumber(input?.returnBalanceReduced)),
+      originalInstallmentAmount > 0 ? money(originalInstallmentAmount) : null,
+      installmentCount,
+      asText(input?.notes),
+      status,
+    ],
+  );
+  if (!inserted.rowCount) return id;
+
+  for (const item of normalizedItems) {
+    if (updateStock && item.batchId) {
+      const batchRes = await client.query(
+        "SELECT available_quantity FROM warehouse_batches WHERE id=$1 FOR UPDATE",
+        [item.batchId],
+      );
+      if (!batchRes.rowCount)
+        throw httpError(409, `دفعة المخزون ${item.batchId} غير موجودة.`);
+      const available = Number(batchRes.rows[0].available_quantity);
+      if (available < item.quantity)
+        throw httpError(
+          409,
+          `الكمية المتاحة غير كافية في الدفعة ${item.batchId}. المتاح: ${available}.`,
+        );
+      await client.query(
+        "UPDATE warehouse_batches SET available_quantity=available_quantity-$2,updated_at=$3 WHERE id=$1",
+        [item.batchId, item.quantity, nowMs()],
+      );
+      const serials = await client.query(
+        "SELECT id FROM devices WHERE warehouse_batch_id=$1 AND status='available' ORDER BY created_at,id LIMIT $2 FOR UPDATE",
+        [item.batchId, item.quantity],
+      );
+      if (serials.rowCount)
+        await client.query(
+          "UPDATE devices SET status='sold' WHERE id=ANY($1::text[])",
+          [serials.rows.map((r) => r.id)],
+        );
+    } else if (importMode && item.batchId) {
+      // The imported batch already has its historic availableQuantity. Update only its serial statuses.
+      const serials = await client.query(
+        "SELECT id FROM devices WHERE warehouse_batch_id=$1 AND status='available' ORDER BY created_at,id LIMIT $2 FOR UPDATE",
+        [item.batchId, item.quantity],
+      );
+      if (serials.rowCount)
+        await client.query(
+          "UPDATE devices SET status='sold' WHERE id=ANY($1::text[])",
+          [serials.rows.map((r) => r.id)],
+        );
+    }
+    await client.query(
+      `INSERT INTO sale_items(id,sale_id,line_number,brand,series,model,color,ram,storage,original_price,cash_price,installment_price,cash_final_price,installment_final_price,final_price,offer_name,quantity,warehouse_batch_id,unit_cost,is_new_stock)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) ON CONFLICT(id) DO NOTHING`,
+      [
+        item.id,
+        id,
+        item.lineNumber,
+        item.brand,
+        item.series,
+        item.model,
+        item.color,
+        item.ram,
+        item.storage,
+        item.originalPrice,
+        item.cashPrice,
+        item.installmentPrice,
+        item.cashFinalPrice,
+        item.installmentFinalPrice,
+        item.finalPrice,
+        item.offerName,
+        item.quantity,
+        item.batchId,
+        item.unitCost,
+        item.isNewStock,
+      ],
+    );
+  }
+  for (const [idx, installment] of installments.entries()) {
+    const number = Number(installment?.number || idx + 1);
+    const amount = money(asNumber(installment?.amount));
+    const dueDate = asText(installment?.dueDate);
+    if (
+      !Number.isInteger(number) ||
+      number < 1 ||
+      amount < 0 ||
+      !/^\d{4}-\d{2}-\d{2}$/.test(dueDate)
+    )
+      throw httpError(400, `بيانات القسط رقم ${idx + 1} غير صحيحة.`);
+    const paidAmount = Math.min(
+      amount,
+      Math.max(
+        0,
+        money(
+          asNumber(installment?.paidAmount, installment?.paid ? amount : 0),
+        ),
+      ),
+    );
+    await client.query(
+      `INSERT INTO sale_installments(sale_id,installment_number,amount,due_date,paid,paid_amount) VALUES($1,$2,$3,$4,$5,$6) ON CONFLICT(sale_id,installment_number) DO NOTHING`,
+      [
+        id,
+        number,
+        amount,
+        dueDate,
+        Boolean(installment?.paid) || paidAmount >= amount,
+        paidAmount,
+      ],
+    );
+  }
+  if (amountPaid > 0) {
+    await client.query(
+      `INSERT INTO payments(id,sale_id,installment_number,amount,record_type,created_at,note) VALUES($1,$2,NULL,$3,'initial_payment',$4,$5) ON CONFLICT(id) DO NOTHING`,
+      [
+        newId("payment-"),
+        id,
+        amountPaid,
+        createdAt,
+        importMode
+          ? "ملخص التحصيلات المستوردة من التخزين المحلي"
+          : "دفعة أولى / تحصيل عند إنشاء الفاتورة",
+      ],
+    );
+  }
+  return id;
+}
+
+function completedMonthsBetween(startValue, endDate = new Date()) {
+  const start = new Date(Number(startValue));
+  if (Number.isNaN(start.getTime()) || endDate < start) return 0;
+  let months =
+    (endDate.getFullYear() - start.getFullYear()) * 12 +
+    endDate.getMonth() -
+    start.getMonth();
+  const anniversary = new Date(start);
+  anniversary.setDate(1);
+  anniversary.setMonth(start.getMonth() + months);
+  anniversary.setDate(
+    Math.min(
+      start.getDate(),
+      new Date(
+        anniversary.getFullYear(),
+        anniversary.getMonth() + 1,
+        0,
+      ).getDate(),
+    ),
+  );
+  if (endDate < anniversary) months -= 1;
+  return Math.max(0, months);
+}
+function monthlyInstallmentRate(sale, installments) {
+  const original = Math.max(0, asNumber(sale.original_installment_amount));
+  if (original > 0) return original;
+  const amounts = installments
+    .map((x) => money(asNumber(x.amount)))
+    .filter((x) => x > 0);
+  if (!amounts.length) return 0;
+  const counts = new Map();
+  for (const amount of amounts)
+    counts.set(amount, (counts.get(amount) || 0) + 1);
+  return [...counts.entries()].sort((a, b) => b[1] - a[1] || b[0] - a[0])[0][0];
+}
+function getReturnPrice(item, method) {
+  const prices =
+    method === "installment"
+      ? [item.installment_final_price, item.final_price, item.installment_price]
+      : [item.cash_final_price, item.final_price, item.cash_price];
+  return prices.map((v) => asNumber(v)).find((v) => v > 0) || 0;
+}
+async function createReturn(client, input) {
+  const saleId = asText(input?.invoiceId || input?.saleId);
+  const itemIndex = Number(input?.itemIndex);
+  const quantity = Number(input?.quantityReturned);
+  if (
+    !saleId ||
+    !Number.isInteger(itemIndex) ||
+    itemIndex < 0 ||
+    !Number.isInteger(quantity) ||
+    quantity < 1
+  )
+    throw httpError(400, "بيانات المرتجع غير مكتملة أو غير صحيحة.");
+  const saleRes = await client.query(
+    "SELECT * FROM sales WHERE id=$1 FOR UPDATE",
+    [saleId],
+  );
+  if (!saleRes.rowCount) throw httpError(404, "الفاتورة الأصلية غير موجودة.");
+  const sale = saleRes.rows[0];
+  const itemRes = await client.query(
+    "SELECT * FROM sale_items WHERE sale_id=$1 AND line_number=$2 FOR UPDATE",
+    [saleId, itemIndex],
+  );
+  if (!itemRes.rowCount)
+    throw httpError(404, "لم يتم العثور على البند داخل الفاتورة.");
+  const item = itemRes.rows[0];
+  const returnedRes = await client.query(
+    "SELECT COALESCE(SUM(quantity_returned),0) AS total FROM returns WHERE sale_item_id=$1",
+    [item.id],
+  );
+  const returnedQty = Number(returnedRes.rows[0].total || 0);
+  const remainingQty = Number(item.quantity) - returnedQty;
+  if (quantity > remainingQty)
+    throw httpError(
+      409,
+      `الكمية أكبر من المتاح للإرجاع. المتاح: ${remainingQty}.`,
+    );
+
+  const unitPrice = getReturnPrice(item, sale.payment_method);
+  if (unitPrice <= 0)
+    throw httpError(400, "لم يتم العثور على سعر بيع صالح لهذا المنتج.");
+  const gross = money(unitPrice * quantity);
+  const installmentsRes = await client.query(
+    "SELECT * FROM sale_installments WHERE sale_id=$1 ORDER BY installment_number FOR UPDATE",
+    [saleId],
+  );
+  const installments = installmentsRes.rows;
+  let usageFee = 0;
+  if (sale.payment_method === "installment" && gross > 0) {
+    const months = completedMonthsBetween(sale.created_at);
+    const monthlyRate = monthlyInstallmentRate(sale, installments);
+    const total = Math.max(0, Number(sale.total));
+    if (months > 0 && monthlyRate > 0 && total > 0) {
+      const returnedShare = Math.min(1, gross / total);
+      usageFee = money(Math.min(gross, monthlyRate * months * returnedShare));
+    }
+  }
+  const net = money(Math.max(0, gross - usageFee));
+  const remaining = Math.max(0, Number(sale.remaining_amount));
+  let availableDebt = sale.payment_method === "cash" ? 0 : remaining;
+  if (sale.payment_method === "installment") {
+    const scheduleOutstanding = installments.reduce((sum, row) => {
+      const amt = Math.max(0, Number(row.amount));
+      const already = Math.min(
+        amt,
+        Math.max(0, Number(row.paid_amount ?? (row.paid ? amt : 0))),
+      );
+      return sum + Math.max(0, amt - already);
+    }, 0);
+    availableDebt = Math.min(remaining, scheduleOutstanding);
+  }
+  const wantedReduction = money(Math.min(net, availableDebt));
+  let appliedReduction = wantedReduction;
+  let newRemaining = money(Math.max(0, remaining - wantedReduction));
+  if (sale.payment_method === "installment" && wantedReduction > 0) {
+    let toReduce = wantedReduction;
+    for (const row of [...installments].sort(
+      (a, b) => Number(b.installment_number) - Number(a.installment_number),
+    )) {
+      if (toReduce <= 0.000001) break;
+      const currentAmount = Math.max(0, Number(row.amount));
+      const paidAmount = Math.min(
+        currentAmount,
+        Math.max(0, Number(row.paid_amount ?? (row.paid ? currentAmount : 0))),
+      );
+      const unpaid = Math.max(0, currentAmount - paidAmount);
+      if (unpaid <= 0.000001) continue;
+      const applied = Math.min(unpaid, toReduce);
+      const nextAmount = money(Math.max(paidAmount, currentAmount - applied));
+      const nextPaid = paidAmount >= nextAmount - 0.000001;
+      await client.query(
+        "UPDATE sale_installments SET amount=$3,paid=$4,paid_amount=$5 WHERE sale_id=$1 AND installment_number=$2",
+        [saleId, row.installment_number, nextAmount, nextPaid, paidAmount],
+      );
+      toReduce = money(Math.max(0, toReduce - applied));
+    }
+    appliedReduction = money(wantedReduction - toReduce);
+    newRemaining = money(Math.max(0, remaining - appliedReduction));
+  }
+  const customerRefund = money(Math.max(0, net - appliedReduction));
+  const returnId = asText(input?.returnId) || newId("RET-");
+  const returnNumber =
+    asText(input?.returnNumber) ||
+    `R-${new Date().getFullYear()}-${String(nowMs()).slice(-6)}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
+  const nowIso = new Date().toISOString();
+  const reason = validEnum(
+    asText(input?.reason, "defect"),
+    ["defect", "change_mind", "unsuitable", "other"],
+    "سبب المرتجع",
+  );
+  const condition = validEnum(
+    asText(input?.deviceCondition, "sound"),
+    ["sound", "damaged", "inspection_needed"],
+    "حالة الجهاز",
+  );
+  const settlementMethod = validEnum(
+    asText(
+      input?.settlementMethod,
+      customerRefund > 0 ? "cash_refund" : "remaining_settlement",
+    ),
+    ["cash_refund", "store_credit", "remaining_settlement", "exchange"],
+    "طريقة التسوية",
+  );
+  const settlementStatus = customerRefund > 0 ? "pending" : "completed";
+  const modelLabel =
+    `${item.brand} ${item.model}${item.storage ? ` (${item.storage}` : ""}${item.color ? `${item.storage ? ", " : " ("}${item.color}` : ""}${item.storage || item.color ? ")" : ""}`.trim();
+  await client.query(
+    `INSERT INTO returns(return_id,return_number,created_at,sale_id,invoice_number,customer_name,customer_phone,item_index,sale_item_id,device_id,model,quantity_returned,unit_price,total_refund_amount,usage_fee,net_return_amount,balance_reduced,customer_refund_amount,settlement_status,reason,device_condition,settlement_method,status)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,'completed')`,
+    [
+      returnId,
+      returnNumber,
+      nowIso,
+      saleId,
+      sale.invoice_number,
+      sale.customer_name,
+      sale.customer_phone,
+      itemIndex,
+      item.id,
+      item.id,
+      modelLabel,
+      quantity,
+      unitPrice,
+      gross,
+      usageFee,
+      net,
+      appliedReduction,
+      customerRefund,
+      settlementStatus,
+      reason,
+      condition,
+      settlementMethod,
+    ],
+  );
+  const status =
+    newRemaining <= 0
+      ? "paid"
+      : Number(sale.amount_paid) > 0
+        ? "partial"
+        : "unpaid";
+  const note = `فاتورة مرتجع ${returnNumber} (${returnId}): قيمة المرتجع ${gross} ج.م، خصم استخدام ${usageFee} ج.م، وصافي المرتجع ${net} ج.م؛ خُصم ${appliedReduction} ج.م من المديونية${customerRefund > 0 ? `، ومستحق للعميل رد ${customerRefund} ج.م` : ""}.`;
+  await client.query(
+    "UPDATE sales SET remaining_amount=$2, return_balance_reduced=return_balance_reduced+$3, notes=concat_ws(E'\\n',NULLIF(notes,''),$4), status=$5 WHERE id=$1",
+    [saleId, newRemaining, appliedReduction, note, status],
+  );
+  return returnId;
+}
+
+async function serializeReturn(row) {
+  const saleId = row.sale_id || row.invoice_id;
+  const linked = row.linked_new_invoice_number || row.linked_from_notes || null;
+  return {
+    returnId: row.return_id,
+    returnNumber: row.return_number,
+    createdAt: row.created_at,
+    invoiceId: saleId,
+    invoiceNumber: row.invoice_number,
+    customerName: row.customer_name,
+    customerPhone: row.customer_phone,
+    itemIndex: Number(row.item_index),
+    deviceId: row.device_id,
+    model: row.model,
+    quantityReturned: Number(row.quantity_returned),
+    unitPrice: Number(row.unit_price),
+    totalRefundAmount: Number(row.total_refund_amount),
+    usageFee: Number(row.usage_fee),
+    netReturnAmount: Number(row.net_return_amount),
+    balanceReduced: Number(row.balance_reduced),
+    customerRefundAmount: Number(row.customer_refund_amount),
+    settlementStatus: row.settlement_status,
+    reason: row.reason,
+    deviceCondition: row.device_condition,
+    settlementMethod: row.settlement_method,
+    status: row.status,
+    linkedNewInvoiceNumber: linked || undefined,
+  };
+}
+async function fetchReturns(client = pool) {
+  const rows = await client.query(
+    `SELECT r.*,
+       (SELECT s2.invoice_number FROM sales s2
+        WHERE s2.id <> r.sale_id
+          AND (s2.notes LIKE '%' || r.return_id || '%' OR s2.notes LIKE '%' || r.return_number || '%')
+        ORDER BY s2.created_at DESC LIMIT 1) AS linked_from_notes
+     FROM returns r ORDER BY r.created_at DESC, r.return_number DESC`,
+  );
+  return rows.rows.map(serializeReturn);
+}
+
+// Liveness and DB readiness.
+app.get("/api/health", async (_req, res, next) => {
+  try {
+    const result = await pool.query(
+      "SELECT current_database() AS database, current_user AS db_user, version() AS version",
+    );
+    res.json({
+      ok: true,
+      api: "up",
+      database: "up",
+      databaseName: result.rows[0].database,
+      databaseUser: result.rows[0].db_user,
+      postgresVersion: result.rows[0].version,
+      checkedAt: new Date().toISOString(),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Brands and their normalized series/models.
+app.get("/api/brands", async (_req, res, next) => {
+  try {
+    res.json(await getBrands());
+  } catch (e) {
+    next(e);
+  }
+});
+app.post("/api/brands", async (req, res, next) => {
+  try {
+    const saved = await transaction((client) =>
+      saveBrandObject(client, req.body),
+    );
+    const brands = await getBrands();
+    res
+      .status(201)
+      .json(
+        brands.find((x) => x.id === saved.id) ||
+          brands.find((x) => keyText(x.name) === keyText(req.body?.name)),
+      );
+  } catch (e) {
+    next(e);
+  }
+});
+app.put("/api/brands/:id", async (req, res, next) => {
+  try {
+    const id = asText(req.params.id);
+    const name = asText(req.body?.name);
+    if (!name) throw httpError(400, "اسم الماركة مطلوب.");
+    await transaction(async (client) => {
+      const found = await client.query("SELECT id FROM brands WHERE id=$1", [
+        id,
+      ]);
+      if (!found.rowCount) throw httpError(404, "الماركة غير موجودة.");
+      await client.query("UPDATE brands SET name=$2,name_key=$3 WHERE id=$1", [
+        id,
+        name,
+        keyText(name),
+      ]);
+      await saveBrandObject(client, { ...req.body, id, name });
+    });
+    const brands = await getBrands();
+    res.json(brands.find((x) => x.id === id));
+  } catch (e) {
+    next(e);
+  }
+});
+app.delete("/api/brands/:id", async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      "DELETE FROM brands WHERE id=$1 RETURNING id",
+      [req.params.id],
+    );
+    if (!result.rowCount) throw httpError(404, "الماركة غير موجودة.");
+    res.json({ ok: true, id: result.rows[0].id });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Warehouse batches are the stock unit used by the uploaded sales screen.
+app.get("/api/warehouse-batches", async (_req, res, next) => {
+  try {
+    res.json(await listBatches());
+  } catch (e) {
+    next(e);
+  }
+});
+app.get("/api/warehouse", async (_req, res, next) => {
+  try {
+    res.json(await listBatches());
+  } catch (e) {
+    next(e);
+  }
+});
+app.post("/api/warehouse-batches", async (req, res, next) => {
+  try {
+    const id = await transaction((client) => createBatch(client, req.body));
+    res.status(201).json(await getBatch(id));
+  } catch (e) {
+    next(e);
+  }
+});
+app.post("/api/warehouse", async (req, res, next) => {
+  try {
+    const id = await transaction((client) => createBatch(client, req.body));
+    res.status(201).json(await getBatch(id));
+  } catch (e) {
+    next(e);
+  }
+});
+app.put("/api/warehouse-batches/:id", async (req, res, next) => {
+  try {
+    const id = asText(req.params.id);
+    const batch = await transaction(async (client) => {
+      const oldRes = await client.query(
+        "SELECT * FROM warehouse_batches WHERE id=$1 FOR UPDATE",
+        [id],
+      );
+      if (!oldRes.rowCount) throw httpError(404, "دفعة المخزون غير موجودة.");
+      const old = oldRes.rows[0];
+      const received = Number(
+        req.body?.receivedQuantity ?? old.received_quantity,
+      );
+      const cost = money(asNumber(req.body?.unitCost, Number(old.unit_cost)));
+      const price = money(
+        asNumber(req.body?.salePrice, Number(old.sale_price)),
+      );
+      const outgoing =
+        Number(old.received_quantity) - Number(old.available_quantity);
+      if (!Number.isInteger(received) || received < 1 || received < outgoing)
+        throw httpError(
+          409,
+          "الكمية الجديدة لا يمكن أن تقل عن عدد القطع التي خرجت من المخزون.",
+        );
+      const brandName = asText(req.body?.brand, "");
+      const seriesName = asText(req.body?.series, "عام") || "عام";
+      const modelName = asText(req.body?.model, "");
+      const catalog =
+        brandName && modelName
+          ? await resolveCatalog(client, brandName, seriesName, modelName)
+          : {
+              brandId: old.brand_id,
+              seriesId: old.series_id,
+              modelId: old.model_id,
+            };
+      await client.query(
+        `UPDATE warehouse_batches SET brand_id=$2,series_id=$3,model_id=$4,received_quantity=$5,available_quantity=$6,unit_cost=$7,sale_price=$8,supplier_name=$9,received_at=$10,updated_at=$11 WHERE id=$1`,
+        [
+          id,
+          catalog.brandId,
+          catalog.seriesId,
+          catalog.modelId,
+          received,
+          received - outgoing,
+          cost,
+          price,
+          asText(req.body?.supplierName, ""),
+          Number(req.body?.receivedAt ?? old.received_at),
+          nowMs(),
+        ],
+      );
+      await client.query(
+        "UPDATE devices SET brand_id=$2,series_id=$3,model_id=$4,sale_price=$5,installment_price=$5,unit_cost=$6 WHERE warehouse_batch_id=$1",
+        [id, catalog.brandId, catalog.seriesId, catalog.modelId, price, cost],
+      );
+      if (Array.isArray(req.body?.imeis)) {
+        const imeis = req.body.imeis.map((v) => asText(v)).filter(Boolean);
+        if (imeis.length > received)
+          throw httpError(400, "عدد أرقام IMEI أكبر من كمية الدفعة.");
+        if (new Set(imeis.map(keyText)).size !== imeis.length)
+          throw httpError(400, "يوجد رقم IMEI مكرر داخل الدفعة.");
+        const anySales = await client.query(
+          "SELECT 1 FROM sale_items WHERE warehouse_batch_id=$1 LIMIT 1",
+          [id],
+        );
+        if (anySales.rowCount)
+          throw httpError(
+            409,
+            "لا يمكن تغيير قائمة IMEI بعد ارتباط الدفعة بفاتورة بيع.",
+          );
+        await client.query("DELETE FROM devices WHERE warehouse_batch_id=$1", [
+          id,
+        ]);
+        for (const imei of imeis) {
+          await client.query(
+            `INSERT INTO devices(id,imei,imei_key,brand_id,series_id,model_id,color,ram,storage,sale_price,installment_price,status,created_at,warehouse_batch_id,unit_cost)
+             VALUES($1,$2,$3,$4,$5,$6,'','','',$7,$7,'available',$8,$9,$10)`,
+            [
+              newId("device-"),
+              imei,
+              keyText(imei),
+              catalog.brandId,
+              catalog.seriesId,
+              catalog.modelId,
+              price,
+              nowMs(),
+              id,
+              cost,
+            ],
+          );
+        }
+      }
+      return id;
+    });
+    res.json(await getBatch(batch));
+  } catch (e) {
+    next(e);
+  }
+});
+app.delete("/api/warehouse-batches/:id", async (req, res, next) => {
+  try {
+    const id = asText(req.params.id);
+    await transaction(async (client) => {
+      const found = await client.query(
+        "SELECT * FROM warehouse_batches WHERE id=$1 FOR UPDATE",
+        [id],
+      );
+      if (!found.rowCount) throw httpError(404, "دفعة المخزون غير موجودة.");
+      if (
+        Number(found.rows[0].available_quantity) !==
+        Number(found.rows[0].received_quantity)
+      )
+        throw httpError(
+          409,
+          "لا يمكن حذف دفعة خرجت منها قطع؛ حفاظًا على سجل المبيعات.",
+        );
+      const linked = await client.query(
+        "SELECT 1 FROM sale_items WHERE warehouse_batch_id=$1 LIMIT 1",
+        [id],
+      );
+      if (linked.rowCount)
+        throw httpError(409, "لا يمكن حذف دفعة مرتبطة بسجل مبيعات.");
+      await client.query("DELETE FROM warehouse_batches WHERE id=$1", [id]);
+    });
+    res.json({ ok: true, id });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Compatibility read route for registered IMEIs; sales currently reserve/consume quantities by batch.
+app.get("/api/devices", async (req, res, next) => {
+  try {
+    const params = [];
+    let where = "";
+    if (req.query.q) {
+      params.push(`%${asText(req.query.q)}%`);
+      where = "WHERE (d.imei ILIKE $1 OR b.name ILIKE $1 OR bm.name ILIKE $1)";
+    }
+    const result = await pool.query(
+      `SELECT d.*,b.name AS brand,bs.name AS series,bm.name AS model,o.name AS offer_name,
+              o.discount_type,o.discount_value,o.duration_days,o.expires_at
+       FROM devices d JOIN brands b ON b.id=d.brand_id JOIN brand_series bs ON bs.id=d.series_id
+       JOIN brand_models bm ON bm.id=d.model_id LEFT JOIN offers o ON o.id=d.offer_id
+       ${where} ORDER BY d.created_at DESC LIMIT 5000`,
+      params,
+    );
+    res.json(
+      result.rows.map((r) => ({
+        id: r.id,
+        imei: r.imei,
+        brand: r.brand,
+        series: r.series,
+        model: r.model,
+        color: r.color,
+        ram: r.ram,
+        storage: r.storage,
+        salePrice: Number(r.sale_price),
+        installmentPrice: Number(r.installment_price),
+        offer: r.offer_name
+          ? {
+              name: r.offer_name,
+              discountType: r.discount_type,
+              discountValue: Number(r.discount_value),
+              durationDays: Number(r.duration_days),
+              expiresAt: Number(r.expires_at),
+            }
+          : null,
+        status: r.status,
+        createdAt: Number(r.created_at),
+        warehouseBatchId: r.warehouse_batch_id || undefined,
+        unitCost: Number(r.unit_cost),
+      })),
+    );
+  } catch (e) {
+    next(e);
+  }
+});
+app.post("/api/devices", async (req, res, next) => {
+  try {
+    const id = await transaction((client) => createDevice(client, req.body));
+    const row = await fetchDevice(id);
+    res.status(201).json(row);
+  } catch (e) {
+    next(e);
+  }
+});
+app.put("/api/devices/:id", async (req, res, next) => {
+  try {
+    const id = asText(req.params.id);
+    await transaction(async (client) => {
+      const old = await client.query(
+        "SELECT id FROM devices WHERE id=$1 FOR UPDATE",
+        [id],
+      );
+      if (!old.rowCount) throw httpError(404, "الجهاز غير موجود.");
+      const existingRecord = await fetchDevice(id, client);
+      const record = { ...existingRecord, ...req.body };
+      const catalog = await resolveCatalog(
+        client,
+        asText(record.brand),
+        asText(record.series) || "عام",
+        asText(record.model),
+      );
+      const imei = asText(record.imei);
+      if (!imei) throw httpError(400, "رقم IMEI مطلوب.");
+      const duplicate = await client.query(
+        "SELECT id FROM devices WHERE imei_key=$1 AND id<>$2",
+        [keyText(imei), id],
+      );
+      if (duplicate.rowCount) throw httpError(409, "رقم IMEI مسجل بالفعل.");
+      const offerId = record.offer
+        ? await ensureOffer(client, record.offer)
+        : null;
+      await client.query(
+        `UPDATE devices SET imei=$2,imei_key=$3,brand_id=$4,series_id=$5,model_id=$6,color=$7,ram=$8,storage=$9,sale_price=$10,installment_price=$11,offer_id=$12,status=$13,created_at=$14,warehouse_batch_id=$15,unit_cost=$16 WHERE id=$1`,
+        [
+          id,
+          imei,
+          keyText(imei),
+          catalog.brandId,
+          catalog.seriesId,
+          catalog.modelId,
+          asText(record.color),
+          asText(record.ram),
+          asText(record.storage),
+          money(asNumber(record.salePrice)),
+          money(asNumber(record.installmentPrice)),
+          offerId,
+          validEnum(
+            asText(record.status, "available"),
+            ["available", "sold", "reserved"],
+            "حالة الجهاز",
+          ),
+          Number(record.createdAt) || nowMs(),
+          asText(record.warehouseBatchId) || null,
+          money(asNumber(record.unitCost)),
+        ],
+      );
+    });
+    res.json(await fetchDevice(id));
+  } catch (e) {
+    next(e);
+  }
+});
+app.delete("/api/devices/:id", async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      "DELETE FROM devices WHERE id=$1 RETURNING id",
+      [req.params.id],
+    );
+    if (!result.rowCount) throw httpError(404, "الجهاز غير موجود.");
+    res.json({ ok: true, id: result.rows[0].id });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Offers and simple key/value app settings are separate business tables, not generic JSON records.
+app.get("/api/offers", async (_req, res, next) => {
+  try {
+    const rows = await pool.query("SELECT * FROM offers ORDER BY name");
+    res.json(
+      rows.rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        discountType: r.discount_type,
+        discountValue: Number(r.discount_value),
+        durationDays: Number(r.duration_days),
+        expiresAt: Number(r.expires_at),
+      })),
+    );
+  } catch (e) {
+    next(e);
+  }
+});
+app.post("/api/offers", async (req, res, next) => {
+  try {
+    const id = await transaction((client) => ensureOffer(client, req.body));
+    const result = await pool.query("SELECT * FROM offers WHERE id=$1", [id]);
+    const r = result.rows[0];
+    res
+      .status(201)
+      .json({
+        id: r.id,
+        name: r.name,
+        discountType: r.discount_type,
+        discountValue: Number(r.discount_value),
+        durationDays: Number(r.duration_days),
+        expiresAt: Number(r.expires_at),
+      });
+  } catch (e) {
+    next(e);
+  }
+});
+app.put("/api/offers/:id", async (req, res, next) => {
+  try {
+    const payload = { ...req.body, id: req.params.id };
+    const id = await transaction((client) => ensureOffer(client, payload));
+    const result = await pool.query("SELECT * FROM offers WHERE id=$1", [id]);
+    const r = result.rows[0];
+    res.json({
+      id: r.id,
+      name: r.name,
+      discountType: r.discount_type,
+      discountValue: Number(r.discount_value),
+      durationDays: Number(r.duration_days),
+      expiresAt: Number(r.expires_at),
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+app.delete("/api/offers/:id", async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      "DELETE FROM offers WHERE id=$1 RETURNING id",
+      [req.params.id],
+    );
+    if (!result.rowCount) throw httpError(404, "العرض غير موجود.");
+    res.json({ ok: true, id: result.rows[0].id });
+  } catch (e) {
+    next(e);
+  }
+});
+app.get("/api/settings", async (_req, res, next) => {
+  try {
+    const rows = await pool.query(
+      "SELECT key,value,updated_at FROM app_settings ORDER BY key",
+    );
+    res.json(
+      rows.rows.map((r) => ({
+        key: r.key,
+        value: r.value,
+        updatedAt: Number(r.updated_at),
+      })),
+    );
+  } catch (e) {
+    next(e);
+  }
+});
+app.put("/api/settings/:key", async (req, res, next) => {
+  try {
+    if (!asText(req.params.key)) throw httpError(400, "مفتاح الإعداد مطلوب.");
+    const result = await pool.query(
+      "INSERT INTO app_settings(key,value,updated_at) VALUES($1,$2::jsonb,$3) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value,updated_at=EXCLUDED.updated_at RETURNING key,value,updated_at",
+      [req.params.key, JSON.stringify(req.body?.value ?? null), nowMs()],
+    );
+    res.json({
+      key: result.rows[0].key,
+      value: result.rows[0].value,
+      updatedAt: Number(result.rows[0].updated_at),
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Sales and invoice read routes.
+app.get("/api/sales", async (req, res, next) => {
+  try {
+    res.json(
+      await fetchSales({ query: asText(req.query.q), limit: req.query.limit }),
+    );
+  } catch (e) {
+    next(e);
+  }
+});
+app.get("/api/sales/:id", async (req, res, next) => {
+  try {
+    const sale = await fetchSales({ id: req.params.id });
+    if (!sale) throw httpError(404, "الفاتورة غير موجودة.");
+    res.json(sale);
+  } catch (e) {
+    next(e);
+  }
+});
+app.post("/api/sales", async (req, res, next) => {
+  try {
+    const id = await transaction((client) => createSale(client, req.body));
+    const sale = await fetchSales({ id });
+    res.status(201).json(sale);
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Payments update the collection ledger, installment schedule, and outstanding amount atomically.
+app.get("/api/payments", async (req, res, next) => {
+  try {
+    const params = [];
+    let where = "";
+    if (req.query.saleId) {
+      params.push(asText(req.query.saleId));
+      where = "WHERE p.sale_id=$1";
+    }
+    const result = await pool.query(
+      `SELECT p.* FROM payments p ${where} ORDER BY p.created_at DESC`,
+      params,
+    );
+    res.json(
+      result.rows.map((r) => ({
+        id: r.id,
+        saleId: r.sale_id,
+        installmentNumber:
+          r.installment_number == null
+            ? undefined
+            : Number(r.installment_number),
+        amount: Number(r.amount),
+        recordType: r.record_type,
+        createdAt: Number(r.created_at),
+        note: r.note,
+      })),
+    );
+  } catch (e) {
+    next(e);
+  }
+});
+app.post("/api/payments", async (req, res, next) => {
+  try {
+    const result = await transaction(async (client) => {
+      const saleId = asText(req.body?.saleId || req.body?.invoiceId);
+      const amount = money(Number(req.body?.amount));
+      const installmentNumber =
+        req.body?.installmentNumber == null
+          ? null
+          : Number(req.body.installmentNumber);
+      if (!saleId || !Number.isFinite(amount) || amount <= 0)
+        throw httpError(
+          400,
+          "الفاتورة والمبلغ مطلوبان، والمبلغ يجب أن يكون أكبر من صفر.",
+        );
+      const saleRes = await client.query(
+        "SELECT * FROM sales WHERE id=$1 FOR UPDATE",
+        [saleId],
+      );
+      if (!saleRes.rowCount) throw httpError(404, "الفاتورة غير موجودة.");
+      const sale = saleRes.rows[0];
+      if (Number(sale.remaining_amount) <= 0)
+        throw httpError(409, "الفاتورة مسددة بالكامل بالفعل.");
+      let maxAllowed = Number(sale.remaining_amount);
+      let installment = null;
+      if (installmentNumber != null) {
+        if (!Number.isInteger(installmentNumber) || installmentNumber < 1)
+          throw httpError(400, "رقم القسط غير صحيح.");
+        const installmentRes = await client.query(
+          "SELECT * FROM sale_installments WHERE sale_id=$1 AND installment_number=$2 FOR UPDATE",
+          [saleId, installmentNumber],
+        );
+        if (!installmentRes.rowCount) throw httpError(404, "القسط غير موجود.");
+        installment = installmentRes.rows[0];
+        maxAllowed = Math.min(
+          maxAllowed,
+          Math.max(
+            0,
+            Number(installment.amount) - Number(installment.paid_amount),
+          ),
+        );
+      }
+      if (amount > maxAllowed + 0.001)
+        throw httpError(
+          409,
+          `المبلغ أكبر من المديونية المتاحة للتحصيل (${money(maxAllowed)} ج.م).`,
+        );
+      if (installment) {
+        const paidAmount = money(Number(installment.paid_amount) + amount);
+        await client.query(
+          "UPDATE sale_installments SET paid_amount=$3,paid=$4 WHERE sale_id=$1 AND installment_number=$2",
+          [
+            saleId,
+            installmentNumber,
+            paidAmount,
+            paidAmount >= Number(installment.amount) - 0.001,
+          ],
+        );
+      }
+      const amountPaid = money(Number(sale.amount_paid) + amount);
+      const remainingAmount = money(
+        Math.max(0, Number(sale.remaining_amount) - amount),
+      );
+      const status =
+        remainingAmount <= 0 ? "paid" : amountPaid > 0 ? "partial" : "unpaid";
+      const note = asText(req.body?.note);
+      await client.query(
+        "UPDATE sales SET amount_paid=$2,remaining_amount=$3,status=$4,notes=concat_ws(E'\\n',NULLIF(notes,''),NULLIF($5,'')) WHERE id=$1",
+        [
+          saleId,
+          amountPaid,
+          remainingAmount,
+          status,
+          note
+            ? `${new Date().toISOString()} — تحصيل${installmentNumber ? ` القسط رقم ${installmentNumber}` : " مبلغ مستحق"}: ${amount} ج.م${note ? ` — ${note}` : ""}`
+            : `${new Date().toISOString()} — تحصيل: ${amount} ج.م`,
+        ],
+      );
+      const recordType =
+        installmentNumber == null ? "debt_payment" : "installment_payment";
+      const paymentId = newId("payment-");
+      await client.query(
+        "INSERT INTO payments(id,sale_id,installment_number,amount,record_type,created_at,note) VALUES($1,$2,$3,$4,$5,$6,$7)",
+        [
+          paymentId,
+          saleId,
+          installmentNumber,
+          amount,
+          recordType,
+          nowMs(),
+          note,
+        ],
+      );
+      return { paymentId, saleId };
+    });
+    res
+      .status(201)
+      .json({
+        ok: true,
+        paymentId: result.paymentId,
+        sale: await fetchSales({ id: result.saleId }),
+      });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Returns are separate records; original invoice totals and sold lines are preserved.
+app.get("/api/returns", async (_req, res, next) => {
+  try {
+    res.json(await fetchReturns());
+  } catch (e) {
+    next(e);
+  }
+});
+app.post("/api/returns", async (req, res, next) => {
+  try {
+    const id = await transaction((client) => createReturn(client, req.body));
+    const all = await fetchReturns();
+    res.status(201).json(all.find((x) => x.returnId === id));
+  } catch (e) {
+    next(e);
+  }
+});
+app.put("/api/returns/:returnId/settlement", async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      "UPDATE returns SET settlement_status='completed' WHERE return_id=$1 RETURNING *",
+      [req.params.returnId],
+    );
+    if (!result.rowCount) throw httpError(404, "سجل المرتجع غير موجود.");
+    res.json(await serializeReturn(result.rows[0]));
+  } catch (e) {
+    next(e);
+  }
+});
+app.patch("/api/returns/:returnId/settlement", async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      "UPDATE returns SET settlement_status='completed' WHERE return_id=$1 RETURNING *",
+      [req.params.returnId],
+    );
+    if (!result.rowCount) throw httpError(404, "سجل المرتجع غير موجود.");
+    res.json(await serializeReturn(result.rows[0]));
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.get("/api/customers", async (req, res, next) => {
+  try {
+    const search = asText(req.query.q);
+    const params = [];
+    let where = "";
+    if (search) {
+      params.push(`%${search}%`);
+      where = "WHERE (name ILIKE $1 OR phone ILIKE $1)";
+    }
+    const rows = await pool.query(
+      `SELECT id,name,phone,created_at,updated_at FROM customers ${where} ORDER BY updated_at DESC LIMIT 1000`,
+      params,
+    );
+    res.json(
+      rows.rows.map((r) => ({
+        id: r.id,
+        name: r.name,
+        phone: r.phone,
+        createdAt: Number(r.created_at),
+        updatedAt: Number(r.updated_at),
+      })),
+    );
+  } catch (e) {
+    next(e);
+  }
+});
+app.get("/api/stats", async (_req, res, next) => {
+  try {
+    const [sales, batches, customers, returns] = await Promise.all([
+      pool.query(
+        "SELECT COUNT(*) AS count,COALESCE(SUM(total),0) AS total,COALESCE(SUM(remaining_amount),0) AS outstanding FROM sales",
+      ),
+      pool.query(
+        "SELECT COALESCE(SUM(available_quantity),0) AS available,COALESCE(SUM(available_quantity*unit_cost),0) AS stock_cost FROM warehouse_batches",
+      ),
+      pool.query("SELECT COUNT(*) AS count FROM customers"),
+      pool.query(
+        "SELECT COUNT(*) AS count,COALESCE(SUM(total_refund_amount),0) AS total FROM returns",
+      ),
+    ]);
+    res.json({
+      salesCount: Number(sales.rows[0].count),
+      salesTotal: Number(sales.rows[0].total),
+      outstanding: Number(sales.rows[0].outstanding),
+      unitsAvailable: Number(batches.rows[0].available),
+      stockCost: Number(batches.rows[0].stock_cost),
+      customersCount: Number(customers.rows[0].count),
+      returnsCount: Number(returns.rows[0].count),
+      returnsTotal: Number(returns.rows[0].total),
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// One-time localStorage migration. Existing IDs are used so retrying the same import is safe.
+// Stock quantities are imported as already recorded (do not subtract imported sales again).
+app.post("/api/import/localstorage", async (req, res, next) => {
+  try {
+    const importKey = asText(req.body?.importKey) || newId("local-import-");
+    const summary = await transaction(async (client) => {
+      const seen = await client.query(
+        "SELECT summary FROM import_batches WHERE import_key=$1",
+        [importKey],
+      );
+      if (seen.rowCount)
+        return { ...seen.rows[0].summary, alreadyImported: true, importKey };
+      const brands = Array.isArray(req.body?.brands) ? req.body.brands : [];
+      const batches = Array.isArray(req.body?.warehouse)
+        ? req.body.warehouse
+        : Array.isArray(req.body?.batches)
+          ? req.body.batches
+          : [];
+      const devices = Array.isArray(req.body?.devices) ? req.body.devices : [];
+      const sales = Array.isArray(req.body?.sales) ? req.body.sales : [];
+      const returns = Array.isArray(req.body?.returns) ? req.body.returns : [];
+      for (const brand of brands) await saveBrandObject(client, brand);
+      for (const batch of batches)
+        await createBatch(client, batch, { importMode: true });
+      for (const device of devices)
+        await createDevice(client, device, { importMode: true });
+      for (const sale of sales)
+        await createSale(client, sale, {
+          importMode: true,
+          updateStock: false,
+        });
+      // Imported sales and installments already include historic debt adjustments; import return rows without applying them a second time.
+      for (const record of returns) {
+        const saleId = asText(record?.invoiceId);
+        const itemIndex = Number(record?.itemIndex);
+        const saleItem = await client.query(
+          "SELECT id FROM sale_items WHERE sale_id=$1 AND line_number=$2",
+          [saleId, itemIndex],
+        );
+        if (!saleItem.rowCount) continue;
+        const returnId =
+          asText(record?.returnId || record?.returnNumber) || newId("RET-");
+        const returnNumber =
+          asText(record?.returnNumber) || `R-IMPORT-${returnId.slice(-12)}`;
+        await client.query(
+          `INSERT INTO returns(return_id,return_number,created_at,sale_id,invoice_number,customer_name,customer_phone,item_index,sale_item_id,device_id,model,quantity_returned,unit_price,total_refund_amount,usage_fee,net_return_amount,balance_reduced,customer_refund_amount,settlement_status,reason,device_condition,settlement_method,status,linked_new_invoice_number)
+           VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24) ON CONFLICT(return_id) DO NOTHING`,
+          [
+            returnId,
+            returnNumber,
+            String(record?.createdAt ?? new Date().toISOString()),
+            saleId,
+            asText(record?.invoiceNumber),
+            asText(record?.customerName),
+            asText(record?.customerPhone),
+            Math.max(0, itemIndex),
+            saleItem.rows[0].id,
+            asText(record?.deviceId),
+            asText(record?.model),
+            Math.max(1, Number(record?.quantityReturned) || 1),
+            Math.max(0, money(asNumber(record?.unitPrice))),
+            Math.max(0, money(asNumber(record?.totalRefundAmount))),
+            Math.max(0, money(asNumber(record?.usageFee))),
+            Math.max(
+              0,
+              money(
+                asNumber(
+                  record?.netReturnAmount,
+                  asNumber(record?.totalRefundAmount) -
+                    asNumber(record?.usageFee),
+                ),
+              ),
+            ),
+            Math.max(0, money(asNumber(record?.balanceReduced))),
+            Math.max(0, money(asNumber(record?.customerRefundAmount))),
+            ["pending", "completed"].includes(record?.settlementStatus)
+              ? record.settlementStatus
+              : "completed",
+            ["defect", "change_mind", "unsuitable", "other"].includes(
+              record?.reason,
+            )
+              ? record.reason
+              : "other",
+            ["sound", "damaged", "inspection_needed"].includes(
+              record?.deviceCondition,
+            )
+              ? record.deviceCondition
+              : "inspection_needed",
+            [
+              "cash_refund",
+              "store_credit",
+              "remaining_settlement",
+              "exchange",
+            ].includes(record?.settlementMethod)
+              ? record.settlementMethod
+              : "remaining_settlement",
+            asText(record?.status) || "completed",
+            asText(record?.linkedNewInvoiceNumber) || null,
+          ],
+        );
+      }
+      await client.query(
+        `UPDATE sales s SET return_balance_reduced = x.total_reduced
+         FROM (SELECT sale_id, SUM(balance_reduced) AS total_reduced FROM returns GROUP BY sale_id) x
+         WHERE x.sale_id=s.id AND s.return_balance_reduced <= 0 AND x.total_reduced > 0`,
+      );
+      const info = {
+        importKey,
+        brands: brands.length,
+        warehouseBatches: batches.length,
+        devices: devices.length,
+        sales: sales.length,
+        returns: returns.length,
+        alreadyImported: false,
+      };
+      await client.query(
+        "INSERT INTO import_batches(import_key,imported_at,summary) VALUES($1,$2,$3::jsonb)",
+        [importKey, nowMs(), JSON.stringify(info)],
+      );
+      return info;
+    });
+    res.status(200).json({ ok: true, ...summary });
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.use((req, res) =>
+  res
+    .status(404)
+    .json({ error: `المسار غير موجود: ${req.method} ${req.path}` }),
+);
+app.use((error, _req, res, _next) => {
+  if (error?.code === "23505") {
+    return res
+      .status(409)
+      .json({
+        error: "يوجد سجل بنفس المعرّف أو القيمة الفريدة بالفعل.",
+        code: error.code,
+        detail: error.detail,
+      });
+  }
+  if (error?.code === "23503") {
+    return res
+      .status(409)
+      .json({
+        error: "لا يمكن تنفيذ العملية لوجود سجلات مرتبطة بها.",
+        code: error.code,
+      });
+  }
+  if (error?.code === "23514" || error?.code === "22P02") {
+    return res
+      .status(400)
+      .json({
+        error: "البيانات المدخلة غير صحيحة.",
+        code: error.code,
+        detail: error.detail,
+      });
+  }
+  const status = Number(error?.status) || 500;
+  if (status >= 500) console.error("API error:", error);
+  res
+    .status(status)
+    .json({
+      error: status >= 500 ? "حدث خطأ داخلي في الخادم." : error.message,
+      ...(process.env.NODE_ENV === "development" && error?.detail
+        ? { detail: error.detail }
+        : {}),
+    });
+});
+
+async function start() {
+  // Applies additive CREATE TABLE / INDEX statements; keeps prior generic tables untouched.
+  const schemaPath = fileURLToPath(new URL("./schema.sql", import.meta.url));
+  const schema = await fs.readFile(schemaPath, "utf8");
+  await pool.query(schema);
+  const dbInfo = await pool.query(
+    "SELECT current_database() AS database, current_user AS db_user, version() AS version",
+  );
+  console.log("PostgreSQL connection OK");
+  console.log(`Database: ${dbInfo.rows[0].database}`);
+  console.log(`User: ${dbInfo.rows[0].db_user}`);
+  console.log(dbInfo.rows[0].version);
+  app.listen(PORT, HOST, () => {
+    console.log(
+      `Mobile System normalized API listening on http://${HOST}:${PORT}`,
+    );
+    console.log(`Health check: http://127.0.0.1:${PORT}/api/health`);
+    console.log(
+      "Tables: brands, brand_series, brand_models, customers, warehouse_batches, sale_items, sales, sale_installments, payments, returns",
+    );
+    if (!API_TOKEN)
+      console.warn(
+        "WARNING: API_TOKEN is empty. Keep port 5000 inside a trusted LAN and configure a token for shared use.",
+      );
+  });
+}
+start().catch((error) => {
+  console.error("Backend startup failed:", error.message);
+  process.exitCode = 1;
+});
+
+process.on("SIGINT", async () => {
+  await pool.end();
+  process.exit(0);
+});
+process.on("SIGTERM", async () => {
+  await pool.end();
+  process.exit(0);
+});

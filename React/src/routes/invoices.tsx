@@ -10,12 +10,12 @@ import {
   Search,
 } from "lucide-react";
 import type { Sale } from "../types/sales";
+import { api } from "../lib/api-client";
 
 export const Route = createFileRoute("/invoices")({
   component: InvoicesPage,
 });
 
-const SALES_KEY = "mobile-system-sales-v1";
 const INPUT_CLASS =
   "w-full rounded-xl border border-gray-400 bg-white px-3.5 py-3 text-sm font-medium text-gray-950 shadow-sm outline-none placeholder:text-gray-500 focus:border-emerald-700 focus:ring-4 focus:ring-emerald-700/15";
 
@@ -33,16 +33,6 @@ function numberText(value: number) {
   );
 }
 
-function readSales(): Sale[] {
-  try {
-    const raw = localStorage.getItem(SALES_KEY);
-    const parsed: unknown = raw ? JSON.parse(raw) : [];
-    return Array.isArray(parsed) ? (parsed as Sale[]) : [];
-  } catch {
-    return [];
-  }
-}
-
 function paymentLabel(method: Sale["paymentMethod"]) {
   if (method === "cash") return "كاش";
   if (method === "credit") return "آجل";
@@ -56,8 +46,23 @@ function InvoicesPage() {
   const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
 
   useEffect(() => {
-    setSales(readSales());
-    setReady(true);
+    let cancelled = false;
+    api
+      .getSales()
+      .then((rows) => {
+        if (cancelled) return;
+        setSales(rows as Sale[]);
+        setReady(true);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        console.error("تعذر تحميل الفواتير من الخادم:", error);
+        setSales([]);
+        setReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   const filteredSales = useMemo(() => {

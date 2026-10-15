@@ -1,4 +1,6 @@
+import { useEffect, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
+import { api } from "../lib/api-client";
 import {
   ArrowDownLeft,
   ArrowLeft,
@@ -74,16 +76,60 @@ const shortcuts = [
     to: "/warehouse" as const,
     color: "bg-violet-50 text-violet-700",
   },
-  {
-    title: "التقارير",
-    description: "مراجعة حركة البيع والمخزون",
-    icon: ChartNoAxesCombined,
-    to: "/reports" as const,
-    color: "bg-amber-50 text-amber-700",
-  },
+  // {
+  //   title: "التقارير",
+  //   description: "مراجعة حركة البيع والمخزون",
+  //   icon: ChartNoAxesCombined,
+  //   to: "/reports" as const,
+  //   color: "bg-amber-50 text-amber-700",
+  // },
 ];
 
 function Dashboard() {
+  const [backendStats, setBackendStats] = useState<{
+    salesCount: number;
+    salesTotal: number;
+    outstanding: number;
+    unitsAvailable: number;
+    customersCount: number;
+  } | null>(null);
+  const [apiReady, setApiReady] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .stats()
+      .then((value) => {
+        if (!cancelled) {
+          setBackendStats(value);
+          setApiReady(true);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setApiReady(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  const displayStats = stats.map((stat, index) => ({
+    ...stat,
+    value: backendStats
+      ? [
+          new Intl.NumberFormat("ar-EG", {
+            style: "currency",
+            currency: "EGP",
+            maximumFractionDigits: 0,
+          }).format(backendStats.salesTotal),
+          new Intl.NumberFormat("ar-EG").format(backendStats.unitsAvailable),
+          new Intl.NumberFormat("ar-EG", {
+            style: "currency",
+            currency: "EGP",
+            maximumFractionDigits: 0,
+          }).format(backendStats.outstanding),
+          new Intl.NumberFormat("ar-EG").format(backendStats.customersCount),
+        ][index]
+      : "—",
+  }));
   return (
     <main dir="rtl" className="mx-auto w-full max-w-[1600px] space-y-7 pb-8">
       <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
@@ -105,7 +151,9 @@ function Dashboard() {
         <div className="flex items-center gap-2 self-start rounded-xl border bg-card px-3 py-2 text-sm">
           <span className="h-2 w-2 rounded-full bg-amber-500" />
           <span className="text-muted-foreground">
-            وضع تجريبي — لم يتم ربط البيانات بعد
+            {apiReady
+              ? "متصل بقاعدة البيانات المشتركة"
+              : "تعذر الاتصال بقاعدة البيانات"}
           </span>
         </div>
       </div>
@@ -155,13 +203,13 @@ function Dashboard() {
           <div>
             <h2 className="text-lg font-bold">ملخص النشاط</h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              مؤشرات النظام — ستظهر الأرقام الحقيقية بعد ربط الـ Backend.
+              مؤشرات مباشرة من قاعدة بيانات المحل المشتركة.
             </p>
           </div>
         </div>
 
         <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
-          {stats.map((stat) => {
+          {displayStats.map((stat) => {
             const Icon = stat.icon;
 
             return (

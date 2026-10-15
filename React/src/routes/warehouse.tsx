@@ -17,14 +17,11 @@ import {
 import SearchSelect from "../components/SearchSelect";
 import type { Brand } from "@/types/device";
 import type { WarehouseBatch } from "@/types/warehouse";
+import { api } from "../lib/api-client";
 
 export const Route = createFileRoute("/warehouse")({
   component: WarehousePage,
 });
-
-const BRANDS_KEY = "mobile-system-brands-v1";
-const DEVICES_KEY = "mobile-system-devices-v1";
-const WAREHOUSE_KEY = "mobile-system-warehouse-v1";
 
 const inputClass =
   "w-full rounded-xl border border-gray-200 bg-white px-3.5 py-3 text-sm text-gray-800 outline-none transition placeholder:text-gray-400 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10";
@@ -83,15 +80,6 @@ function numberText(value: number) {
   return new Intl.NumberFormat("en-US", {
     maximumFractionDigits: 0,
   }).format(Number.isFinite(value) ? value : 0);
-}
-
-function readJson(key: string): unknown {
-  try {
-    const value = localStorage.getItem(key);
-    return value ? JSON.parse(value) : [];
-  } catch {
-    return [];
-  }
 }
 
 function normalizeBrands(raw: unknown): Brand[] {
@@ -209,62 +197,37 @@ function WarehousePage() {
   );
 
   useEffect(() => {
-    const storedBrands = normalizeBrands(readJson(BRANDS_KEY));
-    const storedBatches = readJson(WAREHOUSE_KEY);
-
-    setBrands(storedBrands);
-    setBatches(
-      Array.isArray(storedBatches)
-        ? storedBatches
-            .filter((item): item is WarehouseBatch & Record<string, unknown> =>
-              Boolean(
-                item &&
-                typeof item === "object" &&
-                typeof item.id === "string" &&
-                typeof item.brand === "string" &&
-                typeof item.model === "string" &&
-                Number.isFinite(Number(item.receivedQuantity)) &&
-                Number.isFinite(Number(item.availableQuantity)),
-              ),
-            )
-            .map((item) => ({
-              ...item,
-              receivedQuantity: Number(item.receivedQuantity),
-              availableQuantity: Number(item.availableQuantity),
-              unitCost: Number.isFinite(Number(item.unitCost))
-                ? Number(item.unitCost)
-                : 0,
-              imeis: Array.isArray(item.imeis)
-                ? item.imeis.map((imei) => String(imei))
-                : [],
-              salePrice:
-                item.salePrice != null &&
-                Number.isFinite(Number(item.salePrice))
-                  ? Number(item.salePrice)
-                  : undefined,
-            }))
-        : [],
-    );
-    setReady(true);
+    let cancelled = false;
+    Promise.all([api.getBrands(), api.getWarehouseBatches()])
+      .then(([storedBrands, storedBatches]) => {
+        if (cancelled) return;
+        setBrands(normalizeBrands(storedBrands));
+        setBatches(
+          storedBatches.map((item) => ({
+            ...item,
+            receivedQuantity: Number(item.receivedQuantity),
+            availableQuantity: Number(item.availableQuantity),
+            unitCost: Number(item.unitCost) || 0,
+            salePrice:
+              item.salePrice == null ? undefined : Number(item.salePrice),
+            imeis: Array.isArray(item.imeis) ? item.imeis.map(String) : [],
+          })),
+        );
+        setReady(true);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setToast(
+          error instanceof Error
+            ? error.message
+            : "تعذر الاتصال بقاعدة البيانات.",
+        );
+        setReady(true);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
-
-  useEffect(() => {
-    if (!ready) return;
-    try {
-      localStorage.setItem(BRANDS_KEY, JSON.stringify(brands));
-    } catch {
-      setToast("تعذر حفظ الماركات والموديلات على هذا المتصفح.");
-    }
-  }, [brands, ready]);
-
-  useEffect(() => {
-    if (!ready) return;
-    try {
-      localStorage.setItem(WAREHOUSE_KEY, JSON.stringify(batches));
-    } catch {
-      setToast("تعذر حفظ بيانات المخزن على هذا المتصفح.");
-    }
-  }, [batches, ready]);
 
   useEffect(() => {
     if (!toast) return;
@@ -411,74 +374,7 @@ function WarehousePage() {
     setForm({ ...emptyForm });
   }
 
-  function upsertBrandModel(
-    brandName: string,
-    seriesName: string,
-    modelName: string,
-  ) {
-    const cleanBrand = brandName.trim();
-    const cleanSeries = seriesName.trim() || "عام";
-    const cleanModel = modelName.trim();
-    if (!cleanBrand) return;
-
-    setBrands((current) => {
-      const existing = current.find(
-        (brand) => brand.name.toLowerCase() === cleanBrand.toLowerCase(),
-      );
-
-      if (!existing) {
-        return [
-          ...current,
-          {
-            id: makeId(),
-            name: cleanBrand,
-            models: cleanModel ? [cleanModel] : [],
-            series: [
-              { name: cleanSeries, models: cleanModel ? [cleanModel] : [] },
-            ],
-          },
-        ];
-      }
-
-      const nextSeries = [...existing.series];
-      const seriesIndex = nextSeries.findIndex(
-        (entry) => entry.name.toLowerCase() === cleanSeries.toLowerCase(),
-      );
-
-      if (seriesIndex === -1) {
-        nextSeries.push({
-          name: cleanSeries,
-          models: cleanModel ? [cleanModel] : [],
-        });
-      } else if (cleanModel) {
-        const currentSeries = nextSeries[seriesIndex];
-        nextSeries[seriesIndex] = {
-          ...currentSeries,
-          models: currentSeries.models.some(
-            (model) => model.toLowerCase() === cleanModel.toLowerCase(),
-          )
-            ? currentSeries.models
-            : [...currentSeries.models, cleanModel],
-        };
-      }
-
-      const nextModels =
-        cleanModel &&
-        !existing.models.some(
-          (model) => model.toLowerCase() === cleanModel.toLowerCase(),
-        )
-          ? [...existing.models, cleanModel]
-          : existing.models;
-
-      return current.map((brand) =>
-        brand.id === existing.id
-          ? { ...brand, models: nextModels, series: nextSeries }
-          : brand,
-      );
-    });
-  }
-
-  function handleSubmit(event: FormEvent<HTMLFormElement>) {
+  async function handleSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
     const brand = form.brand.trim();
@@ -527,32 +423,20 @@ function WarehousePage() {
       return;
     }
 
-    const devicesRaw = readJson(DEVICES_KEY);
-    const existingDeviceImeis = Array.isArray(devicesRaw)
-      ? devicesRaw
-          .filter((item) => item && typeof item === "object")
-          .map((item) =>
-            String((item as Record<string, unknown>).imei ?? "").toLowerCase(),
-          )
-          .filter(Boolean)
-      : [];
-
     const batchImeis = batches.flatMap((batch) =>
       Array.isArray(batch.imeis) ? batch.imeis : [],
     );
-    const knownImeis = new Set([
-      ...existingDeviceImeis,
-      ...batchImeis.map((imei) => String(imei).toLowerCase()),
-    ]);
-
-    if (normalizedImeis.some((imei) => knownImeis.has(imei))) {
-      notify("يوجد رقم IMEI مسجل بالفعل في الأجهزة أو دفعات المخزن.");
-      return;
+    if (
+      normalizedImeis.some((imei) =>
+        batchImeis.some((known) => String(known).toLowerCase() === imei),
+      )
+    ) {
+      notify(
+        "رقم IMEI موجود بالفعل في المخزن. سيتم التحقق مرة أخرى من قاعدة البيانات.",
+      );
     }
 
-    upsertBrandModel(brand, series, model);
-
-    const newBatch: WarehouseBatch = {
+    const newBatch = {
       id: makeId(),
       brand,
       series,
@@ -565,13 +449,26 @@ function WarehousePage() {
       receivedAt: Date.now(),
       imeis,
     };
-
-    setBatches((current) => [newBatch, ...current]);
-    resetForm();
-    notify("تم تسجيل دفعة المخزن بنجاح.");
+    try {
+      await api.createWarehouseBatch(newBatch);
+      const [freshBrands, freshBatches] = await Promise.all([
+        api.getBrands(),
+        api.getWarehouseBatches(),
+      ]);
+      setBrands(normalizeBrands(freshBrands));
+      setBatches(freshBatches);
+      resetForm();
+      notify("تم تسجيل دفعة المخزن في قاعدة البيانات بنجاح.");
+    } catch (error) {
+      notify(
+        error instanceof Error
+          ? error.message
+          : "تعذر حفظ دفعة المخزن في قاعدة البيانات.",
+      );
+    }
   }
 
-  function deleteBatch(batch: WarehouseBatch) {
+  async function deleteBatch(batch: WarehouseBatch) {
     const received = Number(batch.receivedQuantity) || 0;
     const available = Number(batch.availableQuantity) || 0;
     if (available < received) {
@@ -584,8 +481,13 @@ function WarehousePage() {
       `هل أنت متأكد من حذف دفعة ${batch.brand} ${batch.model}؟`,
     );
     if (!confirmed) return;
-    setBatches((current) => current.filter((item) => item.id !== batch.id));
-    notify("تم حذف الدفعة.");
+    try {
+      await api.deleteWarehouseBatch(batch.id);
+      setBatches(await api.getWarehouseBatches());
+      notify("تم حذف الدفعة.");
+    } catch (error) {
+      notify(error instanceof Error ? error.message : "تعذر حذف الدفعة.");
+    }
   }
 
   if (!ready) {
