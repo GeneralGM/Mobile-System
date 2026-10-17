@@ -18,14 +18,20 @@ import SearchSelect from "../components/SearchSelect";
 import type { Brand } from "@/types/device";
 import type { WarehouseBatch } from "@/types/warehouse";
 import { api } from "../lib/api-client";
+import { formatDate, formatMoney, formatNumber } from "../lib/format";
+import {
+  APP_INPUT_CLASS,
+  APP_LABEL_CLASS,
+  PageHeader,
+  StatCard,
+} from "../components/ui/app-chrome";
 
 export const Route = createFileRoute("/warehouse")({
   component: WarehousePage,
 });
 
-const inputClass =
-  "w-full rounded-xl border border-gray-200 bg-white px-3.5 py-3 text-sm text-gray-800 outline-none transition placeholder:text-gray-400 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10";
-const labelClass = "mb-2 block text-sm font-medium text-gray-700";
+const inputClass = APP_INPUT_CLASS;
+const labelClass = APP_LABEL_CLASS;
 
 type WarehouseForm = {
   brand: string;
@@ -69,17 +75,11 @@ function makeId() {
 }
 
 function money(value: number) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "EGP",
-    maximumFractionDigits: 2,
-  }).format(Number.isFinite(value) ? value : 0);
+  return formatMoney(value);
 }
 
 function numberText(value: number) {
-  return new Intl.NumberFormat("en-US", {
-    maximumFractionDigits: 0,
-  }).format(Number.isFinite(value) ? value : 0);
+  return formatNumber(value);
 }
 
 function normalizeBrands(raw: unknown): Brand[] {
@@ -492,39 +492,35 @@ function WarehousePage() {
 
   if (!ready) {
     return (
-      <main dir="rtl" className="min-h-screen bg-gray-50 p-6 text-gray-700">
+      <div dir="rtl" className="rounded-xl border border-slate-200 bg-white p-6 text-slate-700">
         جاري تحميل بيانات المخزن...
-      </main>
+      </div>
     );
   }
 
   return (
-    <main dir="rtl" lang="ar" className="min-h-screen bg-gray-50 p-4 md:p-8">
-      <div className="mx-auto max-w-7xl space-y-6">
-        <header className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
-          <div>
-            <div className="mb-2 flex items-center gap-2 text-sm font-medium text-emerald-700">
+    <div dir="rtl" lang="ar" className="space-y-6">
+        <PageHeader
+          eyebrow={
+            <>
               <Package size={17} /> إدارة المخزن
-            </div>
-            <h1 className="text-2xl font-bold tracking-tight text-gray-900 md:text-3xl">
-              استلام بضاعة المخزن
-            </h1>
-            <p className="mt-2 text-sm text-gray-500">
-              سجّل الكميات الواردة وسعر البيع بالقطعة، وأضف أرقام IMEI المتاحة
-              عند الاستلام.
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setShowForm((current) => !current)}
-            className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-5 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700"
-          >
-            {showForm ? <X size={18} /> : <Plus size={18} />}
-            {showForm ? "إخفاء النموذج" : "استلام دفعة جديدة"}
-          </button>
-        </header>
+            </>
+          }
+          title="استلام بضاعة المخزن"
+          description="سجّل الكميات الواردة وسعر البيع بالقطعة، وأضف أرقام IMEI المتاحة عند الاستلام."
+          actions={
+            <button
+              type="button"
+              onClick={() => setShowForm((current) => !current)}
+              className="app-btn-primary"
+            >
+              {showForm ? <X size={18} /> : <Plus size={18} />}
+              {showForm ? "إخفاء النموذج" : "استلام دفعة جديدة"}
+            </button>
+          }
+        />
 
-        <section className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4">
+        <section className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-4">
           <StatCard
             icon={<ClipboardList size={20} />}
             title="إجمالي الوارد"
@@ -542,12 +538,14 @@ function WarehousePage() {
             title="الرصيد المتاح"
             value={numberText(totalAvailable)}
             note="الوحدات المتاحة حسب دفعات المخزن"
+            tone="success"
           />
           <StatCard
             icon={<Package size={20} />}
             title="قيمة الرصيد بالتكلفة"
             value={money(totalCostValue)}
             note="الكمية المتاحة × تكلفة الوحدة"
+            tone="info"
           />
         </section>
 
@@ -625,7 +623,7 @@ function WarehousePage() {
                   />
                 </Field>
 
-                <Field label="تكلفة الوحدة (EGP) *">
+                <Field label="تكلفة الوحدة (EG) *">
                   <input
                     type="number"
                     min="0"
@@ -641,7 +639,7 @@ function WarehousePage() {
                   />
                 </Field>
 
-                <Field label="سعر البيع بالقطعة (EGP) *">
+                <Field label="سعر البيع بالقطعة (EG) *">
                   <input
                     type="number"
                     min="0"
@@ -673,13 +671,13 @@ function WarehousePage() {
                 <button
                   type="button"
                   onClick={resetForm}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl border border-gray-200 px-5 py-3 text-sm font-semibold text-gray-600 transition hover:bg-gray-50"
+                  className="app-btn-secondary"
                 >
                   <X size={16} /> تفريغ الحقول
                 </button>
                 <button
                   type="submit"
-                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-600 px-6 py-3 text-sm font-semibold text-white shadow-sm transition hover:bg-emerald-700"
+                  className="app-btn-primary"
                 >
                   <Check size={17} /> تسجيل الدفعة
                 </button>
@@ -729,8 +727,8 @@ function WarehousePage() {
             </div>
           ) : (
             <div className="w-full overflow-x-auto">
-              <table className="w-full min-w-[1250px] text-right text-sm">
-                <thead className="bg-gray-50 text-xs font-semibold text-gray-500">
+              <table className="app-table min-w-[1250px]">
+                <thead>
                   <tr>
                     <th className="px-5 py-4">الجهاز</th>
                     <th className="px-5 py-4">الموردون</th>
@@ -800,11 +798,7 @@ function WarehousePage() {
                             {supplierLabel}
                           </td>
                           <td className="px-5 py-4 text-gray-600">
-                            {group.lastReceivedAt
-                              ? new Date(
-                                  group.lastReceivedAt,
-                                ).toLocaleDateString("ar-EG")
-                              : "—"}
+                            {formatDate(group.lastReceivedAt)}
                           </td>
                           <td className="px-5 py-4 font-semibold text-gray-800">
                             {numberText(group.totalReceived)}
@@ -894,11 +888,7 @@ function WarehousePage() {
                                   {batch.supplierName || "—"}
                                 </td>
                                 <td className="px-5 py-4 text-gray-600">
-                                  {batch.receivedAt
-                                    ? new Date(
-                                        batch.receivedAt,
-                                      ).toLocaleDateString("ar-EG")
-                                    : "—"}
+                                  {formatDate(batch.receivedAt)}
                                 </td>
                                 <td className="px-5 py-4 font-medium text-gray-700">
                                   {numberText(received)}
@@ -969,12 +959,11 @@ function WarehousePage() {
               {numberText(modelGroups.length)} موديل
             </span>
             <span>
-              إجمالي الشحنات: {numberText(batches.length)} · البيانات محفوظة على
-              هذا المتصفح فقط.
+              إجمالي الشحنات: {numberText(batches.length)} · البيانات من قاعدة
+              البيانات المشتركة.
             </span>
           </div>
         </section>
-      </div>
 
       {toast && (
         <div
@@ -995,35 +984,6 @@ function WarehousePage() {
           </button>
         </div>
       )}
-    </main>
-  );
-}
-
-function StatCard({
-  icon,
-  title,
-  value,
-  note,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  value: string;
-  note: string;
-}) {
-  return (
-    <div className="rounded-2xl border border-gray-200 bg-white p-5 shadow-sm">
-      <div className="flex items-start justify-between gap-3">
-        <div>
-          <p className="text-sm font-medium text-gray-500">{title}</p>
-          <p className="mt-3 text-2xl font-bold tracking-tight text-gray-900">
-            {value}
-          </p>
-        </div>
-        <div className="flex h-11 w-11 items-center justify-center rounded-xl bg-emerald-50 text-emerald-700">
-          {icon}
-        </div>
-      </div>
-      <p className="mt-3 text-xs text-gray-400">{note}</p>
     </div>
   );
 }

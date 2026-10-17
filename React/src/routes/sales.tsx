@@ -18,25 +18,24 @@ import SearchSelect from "../components/SearchSelect";
 import type { WarehouseBatch } from "../types/warehouse";
 import type { CartItem, Installment, Method, Sale } from "../types/sales";
 import { api } from "../lib/api-client";
+import { formatDate, formatMoney, formatNumber } from "../lib/format";
+import {
+  APP_INPUT_CLASS,
+  APP_LABEL_CLASS,
+  PageHeader,
+} from "../components/ui/app-chrome";
 
 export const Route = createFileRoute("/sales")({ component: SalesPage });
 
-const INPUT_CLASS =
-  "w-full rounded-xl border border-gray-400 bg-white px-3.5 py-3 text-sm font-medium text-gray-950 shadow-sm outline-none placeholder:text-gray-500 focus:border-emerald-700 focus:ring-4 focus:ring-emerald-700/15 disabled:cursor-not-allowed disabled:bg-gray-100 disabled:text-gray-500";
-const LABEL_CLASS = "mb-2 block text-sm font-semibold text-gray-900";
+const INPUT_CLASS = APP_INPUT_CLASS;
+const LABEL_CLASS = APP_LABEL_CLASS;
 
 function money(value: number) {
-  return new Intl.NumberFormat("en-US", {
-    style: "currency",
-    currency: "EGP",
-    maximumFractionDigits: 2,
-  }).format(Number.isFinite(value) ? value : 0);
+  return formatMoney(value);
 }
 
 function numberText(value: number) {
-  return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(
-    Number.isFinite(value) ? value : 0,
-  );
+  return formatNumber(value, { maxFraction: 2 });
 }
 
 function makeId() {
@@ -670,43 +669,32 @@ function SalesPage() {
 
   if (!ready)
     return (
-      <main dir="rtl" className="min-h-screen bg-gray-50 p-6 text-gray-900">
+      <div dir="rtl" className="rounded-xl border border-slate-200 bg-white p-6 text-slate-700">
         جاري تحميل المبيعات...
-      </main>
+      </div>
     );
 
   return (
-    <main
-      dir="rtl"
-      lang="ar"
-      className="min-h-screen bg-gray-50 p-4 text-gray-950 md:p-8"
-    >
-      <div className="mx-auto max-w-5xl space-y-6">
-        <header className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <p className="mb-2 flex items-center gap-2 text-sm font-bold text-emerald-800">
+    <div dir="rtl" lang="ar" className="mx-auto max-w-5xl space-y-6">
+        <PageHeader
+          eyebrow={
+            <>
               <CircleDollarSign size={18} /> نقطة البيع
-            </p>
-            <h1 className="text-3xl font-extrabold tracking-tight text-gray-950">
-              فاتورة بيع جديدة
-            </h1>
-            <p className="mt-2 text-sm text-gray-700">
-              اختار الموديل وسجّل البيع؛ رقم IMEI اختياري لو الجهاز غير مسجل
-              برقم تسلسلي.
-            </p>
-          </div>
-          <div className="flex flex-wrap gap-2">
-            <Link
-              to="/invoices"
-              className="inline-flex items-center gap-2 rounded-xl border border-gray-400 bg-white px-4 py-3 text-sm font-bold text-gray-900 shadow-sm hover:bg-gray-100"
-            >
-              <History size={17} /> سجل الفواتير <ChevronLeft size={16} />
-            </Link>
-            <div className="rounded-xl border border-emerald-300 bg-emerald-50 px-4 py-3 text-sm font-bold text-emerald-950">
-              المتاح للبيع: {numberText(availableCount)} قطعة
-            </div>
-          </div>
-        </header>
+            </>
+          }
+          title="فاتورة بيع جديدة"
+          description="اختار الموديل وسجّل البيع؛ رقم IMEI اختياري لو الجهاز غير مسجل برقم تسلسلي."
+          actions={
+            <>
+              <Link to="/invoices" className="app-btn-secondary">
+                <History size={17} /> سجل الفواتير <ChevronLeft size={16} />
+              </Link>
+              <div className="rounded-lg border border-emerald-200 bg-emerald-50 px-4 py-2.5 text-sm font-bold text-emerald-950">
+                المتاح للبيع: {numberText(availableCount)} قطعة
+              </div>
+            </>
+          }
+        />
 
         <section className="rounded-2xl border border-gray-300 bg-white shadow-sm">
           <div className="flex flex-wrap items-center justify-between gap-3 border-b border-gray-200 p-5 md:px-7">
@@ -731,7 +719,7 @@ function SalesPage() {
             <button
               type="button"
               onClick={() => setShowAddForm((value) => !value)}
-              className="inline-flex items-center gap-2 rounded-xl bg-emerald-800 px-4 py-3 text-sm font-extrabold text-white hover:bg-emerald-900"
+              className="app-btn-primary"
             >
               {showAddForm ? <X size={17} /> : <Plus size={17} />}
               {showAddForm ? "إغلاق نموذج الجهاز" : "إضافة جهاز"}
@@ -817,7 +805,7 @@ function SalesPage() {
                     <option value="">تحديد تلقائي — أقدم شحنة متاحة</option>
                     {chosenBatches.map((batch) => (
                       <option key={batch.id} value={batch.id}>
-                        {new Date(batch.receivedAt).toLocaleDateString("ar-EG")}{" "}
+                        {formatDate(batch.receivedAt)}{" "}
                         · {batch.supplierName || "بدون مورد"} · متاح{" "}
                         {numberText(batch.availableQuantity)} ·{" "}
                         {batch.salePrice == null
@@ -843,7 +831,7 @@ function SalesPage() {
                 <button
                   type="submit"
                   disabled={!model || !brand}
-                  className="inline-flex items-center justify-center gap-2 rounded-xl bg-emerald-800 px-6 py-3 text-sm font-extrabold text-white hover:bg-emerald-900 disabled:cursor-not-allowed disabled:opacity-50"
+                  className="app-btn-primary disabled:cursor-not-allowed disabled:opacity-50"
                 >
                   <Plus size={17} /> إضافة الجهاز للفاتورة
                 </button>
@@ -884,12 +872,12 @@ function SalesPage() {
                         </p>
                         <p className="mt-1 text-sm text-gray-700">
                           {batch
-                            ? `الشحنة: ${batch.supplierName || "بدون مورد"} · ${new Date(batch.receivedAt).toLocaleDateString("ar-EG")} · الكمية: ${numberText(item.quantity)}`
+                            ? `الشحنة: ${batch.supplierName || "بدون مورد"} · ${formatDate(batch.receivedAt)} · الكمية: ${numberText(item.quantity)}`
                             : "الشحنة غير موجودة"}
                         </p>
                       </div>
                     </div>
-                    <Field label="سعر البيع الفعلي (ج.م)">
+                    <Field label="سعر البيع الفعلي (EG)">
                       <input
                         type="number"
                         min="0"
@@ -973,8 +961,8 @@ function SalesPage() {
                 <Field
                   label={
                     method === "installment"
-                      ? "الدفعة المقدمة (ج.م)"
-                      : "المدفوع الآن (ج.م)"
+                      ? "الدفعة المقدمة (EG)"
+                      : "المدفوع الآن (EG)"
                   }
                 >
                   <input
@@ -1060,7 +1048,6 @@ function SalesPage() {
             </div>
           </section>
         </form>
-      </div>
       {toast && (
         <div
           role="status"
@@ -1080,7 +1067,7 @@ function SalesPage() {
           </button>
         </div>
       )}
-    </main>
+    </div>
   );
 }
 

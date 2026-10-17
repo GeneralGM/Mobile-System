@@ -201,3 +201,31 @@ CREATE TABLE IF NOT EXISTS import_batches (
   imported_at BIGINT NOT NULL,
   summary JSONB NOT NULL DEFAULT '{}'::jsonb
 );
+
+
+-- Employee identity and organization hierarchy for Mobile System.
+-- PINs are stored as scrypt digests with a per-employee salt; clear PINs are never stored.
+CREATE TABLE IF NOT EXISTS employees (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  name_key TEXT NOT NULL UNIQUE,
+  role TEXT NOT NULL CHECK (role IN ('worker', 'manager', 'owner', 'developer')),
+  pin_salt TEXT NOT NULL,
+  pin_hash TEXT NOT NULL,
+  manager_id TEXT REFERENCES employees(id) ON UPDATE CASCADE ON DELETE SET NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at BIGINT NOT NULL DEFAULT ((extract(epoch FROM clock_timestamp()) * 1000)::BIGINT),
+  updated_at BIGINT NOT NULL DEFAULT ((extract(epoch FROM clock_timestamp()) * 1000)::BIGINT)
+);
+
+-- Additive compatibility migration for databases that already have a legacy employees table.
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS name_key TEXT;
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS pin_salt TEXT;
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS pin_hash TEXT;
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS manager_id TEXT REFERENCES employees(id) ON UPDATE CASCADE ON DELETE SET NULL;
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS is_active BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS created_at BIGINT NOT NULL DEFAULT ((extract(epoch FROM clock_timestamp()) * 1000)::BIGINT);
+ALTER TABLE employees ADD COLUMN IF NOT EXISTS updated_at BIGINT NOT NULL DEFAULT ((extract(epoch FROM clock_timestamp()) * 1000)::BIGINT);
+CREATE INDEX IF NOT EXISTS employees_role_active_idx ON employees(role, is_active);
+CREATE INDEX IF NOT EXISTS employees_manager_idx ON employees(manager_id);
+CREATE INDEX IF NOT EXISTS employees_name_key_idx ON employees(name_key);

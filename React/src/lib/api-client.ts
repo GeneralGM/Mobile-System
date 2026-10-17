@@ -201,12 +201,18 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
+async function request<T>(
+  path: string,
+  init: RequestInit = {},
+  employeeSessionToken?: string,
+): Promise<T> {
   const token = getToken();
   const headers = new Headers(init.headers);
   if (init.body && !headers.has("Content-Type"))
     headers.set("Content-Type", "application/json");
   if (token) headers.set("Authorization", `Bearer ${token}`);
+  if (employeeSessionToken)
+    headers.set("X-Employee-Session", employeeSessionToken);
   let response: Response;
   try {
     response = await fetch(`${await getApiBase()}${path}`, {
@@ -241,7 +247,113 @@ const json = (method: string, value?: unknown): RequestInit => ({
   ...(value === undefined ? {} : { body: JSON.stringify(value) }),
 });
 
+export type EmployeeRole =
+  | "worker"
+  | "accountant"
+  | "manager"
+  | "owner"
+  | "developer";
+
+export type EmployeeRecord = {
+  id: string;
+  name: string;
+  role: EmployeeRole;
+  managerId: string | null;
+  isActive: boolean;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type EmployeeSession = {
+  token: string;
+  expiresAt: number;
+  employee: EmployeeRecord;
+};
+
+export type EmployeeInput = {
+  name: string;
+  role: EmployeeRole;
+  pin?: string;
+  managerId?: string | null;
+};
+let pendingEmployeeSessionToken: string | null = null;
+
+function takeEmployeeSessionToken(explicitToken?: string): string {
+  if (explicitToken) return explicitToken;
+
+  const token = pendingEmployeeSessionToken;
+
+  if (!token) {
+    throw new ApiError(
+      "التحقق من صلاحية الموظف مطلوب. أدخل الرقم السري مرة أخرى.",
+      401,
+    );
+  }
+
+  // لا تحذف الرمز بمجرد قراءته.
+  return token;
+}
+
 export const api = {
+  authenticateEmployee: async (input: { name: string; pin: string }) => {
+    const session = await request<EmployeeSession>(
+      "/api/employees/authenticate",
+      json("POST", input),
+    );
+
+    pendingEmployeeSessionToken = session.token;
+    return session;
+  },
+
+  authenticateEmployeeByPin: async (pin: string) => {
+    const session = await request<EmployeeSession>(
+      "/api/employees/authenticate-pin",
+      json("POST", { pin }),
+    );
+
+    pendingEmployeeSessionToken = session.token;
+    return session;
+  },
+
+  clearEmployeeSessionAuthorization: () => {
+    pendingEmployeeSessionToken = null;
+  },
+  setEmployeeSessionAuthorization: (token: string) => {
+    pendingEmployeeSessionToken = token;
+  },
+
+  getEmployeeDirectory: () =>
+    request<EmployeeRecord[]>("/api/employees/directory"),
+  bootstrapEmployeeOwner: (
+    input: { name: string; pin: string },
+    bootstrapToken: string,
+  ) =>
+    request<EmployeeSession>("/api/employees/bootstrap", {
+      ...json("POST", input),
+      headers: { "X-Bootstrap-Token": bootstrapToken },
+    }),
+  getEmployees: (sessionToken: string) =>
+    request<EmployeeRecord[]>("/api/employees", {}, sessionToken),
+  createEmployee: (input: EmployeeInput, sessionToken?: string) =>
+    request<EmployeeRecord>(
+      "/api/employees",
+      json("POST", input),
+      takeEmployeeSessionToken(sessionToken),
+    ),
+
+  updateEmployee: (id: string, input: EmployeeInput, sessionToken?: string) =>
+    request<EmployeeRecord>(
+      `/api/employees/${encodeURIComponent(id)}`,
+      json("PUT", input),
+      takeEmployeeSessionToken(sessionToken),
+    ),
+
+  deleteEmployee: (id: string, sessionToken?: string) =>
+    request<{ ok: boolean; employee: EmployeeRecord }>(
+      `/api/employees/${encodeURIComponent(id)}`,
+      json("DELETE"),
+      takeEmployeeSessionToken(sessionToken),
+    ),
   health: () =>
     request<{
       ok: boolean;

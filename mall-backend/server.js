@@ -13,6 +13,7 @@ const app = express();
 const PORT = Number(process.env.PORT || 5000);
 const HOST = process.env.HOST || "0.0.0.0";
 const API_TOKEN = String(process.env.API_TOKEN || "").trim();
+// Keep this secret server-side only; never use VITE_API_TOKEN to sign employee sessions.
 
 const pool = new Pool({
   user: process.env.DB_USER || "mobile_store_app",
@@ -82,6 +83,272 @@ async function transaction(fn) {
     throw error;
   } finally {
     client.release();
+  }
+}
+
+// ---- Employee identity, PIN verification, signed sessions, and role policy ----
+const EMPLOYEE_ROLES = new Set([
+  "worker",
+  "accountant",
+  "manager",
+  "owner",
+  "developer",
+]);
+const ROLE_WEIGHTS = {
+  worker: 1,
+  accountant: 2,
+  manager: 3,
+  owner: 4,
+  developer: 5,
+};
+const EMPLOYEE_SESSION_TTL_SECONDS = Math.max(
+  300,
+  Math.min(
+    8 * 60 * 60,
+    Number(process.env.EMPLOYEE_SESSION_TTL_SECONDS) || 1800,
+  ),
+);
+const employeeLoginAttempts = new Map();
+const EMPLOYEE_LOGIN_MAX_ATTEMPTS = 8;
+const EMPLOYEE_LOGIN_WINDOW_MS = 15 * 60 * 1000;
+
+function constantTimeTextEqual(left, right) {
+  const a = Buffer.from(String(left ?? ""));
+  const b = Buffer.from(String(right ?? ""));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+function employeeRole(value, { legacyFallback = false } = {}) {
+  const role = keyText(value);
+  const aliases = new Map([
+    ["worker", "worker"],
+    ["عامل", "worker"],
+    ["موظف", "worker"],
+    ["cashier", "worker"],
+    ["كاشير", "worker"],
+    ["waiter", "worker"],
+    ["كابتن صالة", "worker"],
+    ["accountant", "accountant"],
+    ["محاسب", "accountant"],
+    ["manager", "manager"],
+    ["مدير", "manager"],
+    ["owner", "owner"],
+    ["مالك", "owner"],
+    ["developer", "developer"],
+    ["مبرمج", "developer"],
+    ["مطور", "developer"],
+  ]);
+  const normalized = aliases.get(role);
+  if (normalized && EMPLOYEE_ROLES.has(normalized)) return normalized;
+  if (legacyFallback) return "worker";
+  throw httpError(400, "دور الموظف غير صحيح.");
+}
+
+function employeeSessionSecret() {
+  const secret = String(process.env.EMPLOYEE_SESSION_SECRET || "").trim();
+  if (secret.length < 32) {
+    throw httpError(
+      503,
+      "نظام جلسات الموظفين غير مُعد. اضبط EMPLOYEE_SESSION_SECRET في ملف .env (32 حرفًا على الأقل).",
+    );
+  }
+  return secret;
+}
+
+function deriveEmployeePin(pin, salt) {
+  return new Promise((resolve, reject) => {
+    crypto.scrypt(
+      String(pin),
+      String(salt),
+      64,
+      { maxmem: 64 * 1024 * 1024 },
+      (error, key) => {
+        if (error) return reject(error);
+        resolve(key.toString("base64url"));
+      },
+    );
+  });
+}
+
+async function hashEmployeePin(pin) {
+  const salt = crypto.randomBytes(16).toString("base64url");
+  return { pinSalt: salt, pinHash: await deriveEmployeePin(pin, salt) };
+}
+
+async function verifyEmployeePin(pin, row) {
+  if (!row?.pin_salt || !row?.pin_hash) return false;
+  const computed = await deriveEmployeePin(pin, row.pin_salt);
+  return constantTimeTextEqual(computed, row.pin_hash);
+}
+
+function createEmployeeSession(employee) {
+  const nowSeconds = Math.floor(Date.now() / 1000);
+  const payload = {
+    sub: employee.id,
+    iat: nowSeconds,
+    exp: nowSeconds + EMPLOYEE_SESSION_TTL_SECONDS,
+  };
+  const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
+  const signature = crypto
+    .createHmac("sha256", employeeSessionSecret())
+    .update(encoded)
+    .digest("base64url");
+  return {
+    token: `${encoded}.${signature}`,
+    expiresAt: payload.exp * 1000,
+  };
+}
+
+function readEmployeeSession(token) {
+  if (!token || typeof token !== "string") return null;
+  const parts = token.split(".");
+  if (parts.length !== 2) return null;
+  let payload;
+  try {
+    const expected = crypto
+      .createHmac("sha256", employeeSessionSecret())
+      .update(parts[0])
+      .digest("base64url");
+    if (!constantTimeTextEqual(expected, parts[1])) return null;
+    payload = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8"));
+  } catch {
+    return null;
+  }
+  if (
+    typeof payload?.sub !== "string" ||
+    !Number.isFinite(payload?.exp) ||
+    payload.exp <= Math.floor(Date.now() / 1000)
+  )
+    return null;
+  return payload;
+}
+
+function employeeSafeRecord(row) {
+  return {
+    id: row.id,
+    name: row.name,
+    role: employeeRole(row.role, { legacyFallback: true }),
+    managerId: row.manager_id || null,
+    isActive: Boolean(row.is_active),
+    createdAt: Number(row.created_at || 0),
+    updatedAt: Number(row.updated_at || 0),
+  };
+}
+
+function validateEmployeeName(value) {
+  const name = asText(value);
+  if (name.length < 2 || name.length > 100) {
+    throw httpError(400, "اسم الموظف يجب أن يكون من حرفين إلى 100 حرف.");
+  }
+  return name;
+}
+
+function validateNewPin(value) {
+  const pin = String(value ?? "");
+  if (!/^\d{4,12}$/.test(pin)) {
+    throw httpError(400, "الرقم السري الجديد يجب أن يتكون من 4 إلى 12 رقمًا.");
+  }
+  return pin;
+}
+
+function employeeAttemptKeys(req, name) {
+  return [
+    `ip:${req.ip || "unknown"}`,
+    `account:${req.ip || "unknown"}:${keyText(name)}`,
+  ];
+}
+
+function loginIsLimited(keys) {
+  const now = Date.now();
+  return keys.some((key) => {
+    const entry = employeeLoginAttempts.get(key);
+    if (!entry || now - entry.startedAt > EMPLOYEE_LOGIN_WINDOW_MS) {
+      employeeLoginAttempts.delete(key);
+      return false;
+    }
+    return Boolean(entry.lockedUntil && entry.lockedUntil > now);
+  });
+}
+
+function recordEmployeeLoginFailure(keys) {
+  const now = Date.now();
+  for (const key of keys) {
+    let entry = employeeLoginAttempts.get(key);
+    if (!entry || now - entry.startedAt > EMPLOYEE_LOGIN_WINDOW_MS) {
+      entry = { failures: 0, startedAt: now, lockedUntil: 0 };
+    }
+    entry.failures += 1;
+    if (entry.failures >= EMPLOYEE_LOGIN_MAX_ATTEMPTS) {
+      entry.lockedUntil = now + EMPLOYEE_LOGIN_WINDOW_MS;
+    }
+    employeeLoginAttempts.set(key, entry);
+  }
+}
+
+function clearEmployeeLoginFailures(keys) {
+  for (const key of keys) employeeLoginAttempts.delete(key);
+}
+
+async function requireEmployeeSession(req, res, next) {
+  try {
+    employeeSessionSecret();
+    const payload = readEmployeeSession(
+      asText(req.headers["x-employee-session"]),
+    );
+    if (!payload) {
+      return res.status(401).json({
+        error: "جلسة الموظف غير صالحة أو انتهت. سجّل الدخول مرة أخرى.",
+      });
+    }
+    const result = await pool.query(
+      "SELECT id,name,role,manager_id,is_active,created_at,updated_at FROM employees WHERE id=$1",
+      [payload.sub],
+    );
+    const row = result.rows[0];
+    if (!row || !row.is_active) {
+      return res
+        .status(401)
+        .json({ error: "حساب الموظف غير نشط أو غير موجود." });
+    }
+    req.employee = employeeSafeRecord(row);
+    next();
+  } catch (error) {
+    next(error);
+  }
+}
+
+function requireEmployeeRoles(...roles) {
+  return (req, res, next) => {
+    if (!req.employee || !roles.includes(req.employee.role)) {
+      return res.status(403).json({ error: "ليس لديك صلاحية لتنفيذ العملية." });
+    }
+    next();
+  };
+}
+
+async function migrateLegacyEmployees() {
+  const result = await pool.query(
+    "SELECT id,name,role,pin_salt,pin_hash,name_key,manager_id,is_active FROM employees",
+  );
+  for (const row of result.rows) {
+    const normalizedRole = employeeRole(row.role, { legacyFallback: true });
+    const normalizedNameKey = keyText(row.name);
+    let pinSalt = row.pin_salt;
+    let pinHash = row.pin_hash;
+    // Older app versions stored the clear PIN in pin_hash. Hash it once before serving routes.
+    if (!pinSalt && pinHash != null && String(pinHash).length > 0) {
+      const upgraded = await hashEmployeePin(String(pinHash));
+      pinSalt = upgraded.pinSalt;
+      pinHash = upgraded.pinHash;
+    }
+    await pool.query(
+      `UPDATE employees
+       SET name_key=$2, role=$3, pin_salt=$4, pin_hash=$5,
+           manager_id=CASE WHEN $3 IN ('owner','developer') THEN NULL ELSE manager_id END,
+           is_active=COALESCE(is_active,TRUE), updated_at=COALESCE(updated_at,$6)
+       WHERE id=$1`,
+      [row.id, normalizedNameKey, normalizedRole, pinSalt, pinHash, nowMs()],
+    );
   }
 }
 
@@ -1103,7 +1370,7 @@ async function createReturn(client, input) {
         : "unpaid";
   const note = `فاتورة مرتجع ${returnNumber} (${returnId}): قيمة المرتجع ${gross} ج.م، خصم استخدام ${usageFee} ج.م، وصافي المرتجع ${net} ج.م؛ خُصم ${appliedReduction} ج.م من المديونية${customerRefund > 0 ? `، ومستحق للعميل رد ${customerRefund} ج.م` : ""}.`;
   await client.query(
-    "UPDATE sales SET remaining_amount=$2, return_balance_reduced=return_balance_reduced+$3, notes=concat_ws(E'\\n',NULLIF(notes,''),$4), status=$5 WHERE id=$1",
+    "UPDATE sales SET remaining_amount=$2, return_balance_reduced=return_balance_reduced+$3, notes=concat_ws(E'\\n',NULLIF(notes,''),$4::text), status=$5 WHERE id=$1",
     [saleId, newRemaining, appliedReduction, note, status],
   );
   return returnId;
@@ -1147,7 +1414,7 @@ async function fetchReturns(client = pool) {
         ORDER BY s2.created_at DESC LIMIT 1) AS linked_from_notes
      FROM returns r ORDER BY r.created_at DESC, r.return_number DESC`,
   );
-  return rows.rows.map(serializeReturn);
+  return await Promise.all(rows.rows.map((row) => serializeReturn(row)));
 }
 
 // Liveness and DB readiness.
@@ -1169,6 +1436,396 @@ app.get("/api/health", async (_req, res, next) => {
     next(error);
   }
 });
+
+app.post("/api/employees/authenticate", async (req, res, next) => {
+  try {
+    employeeSessionSecret();
+    const name = asText(req.body?.name);
+    const pin = String(req.body?.pin ?? "");
+    const keys = employeeAttemptKeys(req, name);
+    if (loginIsLimited(keys)) {
+      return res.status(429).json({
+        error: "محاولات تسجيل الدخول كثيرة. حاول مرة أخرى بعد 15 دقيقة.",
+      });
+    }
+    const result = await pool.query(
+      `SELECT id,name,role,manager_id,is_active,created_at,updated_at,pin_salt,pin_hash
+       FROM employees WHERE name_key=$1 LIMIT 2`,
+      [keyText(name)],
+    );
+    const row = result.rows.length === 1 ? result.rows[0] : null;
+    const valid = Boolean(
+      row &&
+      row.is_active &&
+      pin.length >= 4 &&
+      pin.length <= 128 &&
+      (await verifyEmployeePin(pin, row)),
+    );
+    if (!valid) {
+      recordEmployeeLoginFailure(keys);
+      return res
+        .status(401)
+        .json({ error: "اسم الموظف أو الرقم السري غير صحيح." });
+    }
+    clearEmployeeLoginFailures(keys);
+    const session = createEmployeeSession(row);
+    res.json({ ...session, employee: employeeSafeRecord(row) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/employees/authenticate-pin", async (req, res, next) => {
+  try {
+    employeeSessionSecret();
+    const pin = String(req.body?.pin ?? "");
+    const keys = employeeAttemptKeys(req, "__pin_only__");
+    if (loginIsLimited(keys)) {
+      return res.status(429).json({
+        error: "محاولات التحقق كثيرة. حاول مرة أخرى بعد 15 دقيقة.",
+      });
+    }
+
+    if (!/^\d{4,12}$/.test(pin)) {
+      recordEmployeeLoginFailure(keys);
+      return res
+        .status(401)
+        .json({ error: "الرقم السري غير صحيح أو غير صالح." });
+    }
+
+    const result = await pool.query(
+      `SELECT id,name,role,manager_id,is_active,created_at,updated_at,pin_salt,pin_hash
+       FROM employees WHERE is_active=TRUE`,
+    );
+    const matches = [];
+    for (const row of result.rows) {
+      if (await verifyEmployeePin(pin, row)) matches.push(row);
+    }
+
+    if (matches.length !== 1) {
+      recordEmployeeLoginFailure(keys);
+      return res
+        .status(401)
+        .json({ error: "الرقم السري غير صحيح أو غير صالح." });
+    }
+
+    const row = matches[0];
+    clearEmployeeLoginFailures(keys);
+    const session = createEmployeeSession(row);
+    return res.json({ ...session, employee: employeeSafeRecord(row) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/employees/directory", async (_req, res, next) => {
+  try {
+    const result = await pool.query(
+      `SELECT id,name,role,manager_id,is_active,created_at,updated_at FROM employees
+       ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'developer' THEN 1 WHEN 'manager' THEN 2 ELSE 3 END, name`,
+    );
+    res.json(result.rows.map(employeeSafeRecord));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get(
+  "/api/employees",
+  requireEmployeeSession,
+  requireEmployeeRoles("developer", "owner", "manager"),
+  async (req, res, next) => {
+    try {
+      let result;
+      if (req.employee.role === "manager") {
+        result = await pool.query(
+          `SELECT id,name,role,manager_id,is_active,created_at,updated_at FROM employees
+           WHERE id=$1 OR manager_id=$1 OR role IN ('owner','developer')
+           ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'developer' THEN 1 WHEN 'manager' THEN 2 ELSE 3 END, name`,
+          [req.employee.id],
+        );
+      } else {
+        result = await pool.query(
+          `SELECT id,name,role,manager_id,is_active,created_at,updated_at FROM employees
+           ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'developer' THEN 1 WHEN 'manager' THEN 2 ELSE 3 END, name`,
+        );
+      }
+      res.json(result.rows.map(employeeSafeRecord));
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.post(
+  "/api/employees",
+  requireEmployeeSession,
+  requireEmployeeRoles("developer", "owner", "manager"),
+  async (req, res, next) => {
+    try {
+      const name = validateEmployeeName(req.body?.name);
+      const pin = validateNewPin(req.body?.pin);
+      const role = employeeRole(req.body?.role);
+      const actorWeight = ROLE_WEIGHTS[req.employee.role] || 1;
+      const targetWeight = ROLE_WEIGHTS[role] || 1;
+      if (targetWeight > actorWeight) {
+        throw httpError(
+          403,
+          "لا يمكنك إنشاء أو تعيين موظف برتبة أعلى من رتبتك.",
+        );
+      }
+      const actorRole = req.employee.role;
+
+      const mayCreateWorker =
+        role === "worker" &&
+        ["developer", "owner", "manager"].includes(actorRole);
+
+      const mayCreateAccountant =
+        role === "accountant" && ["developer", "owner"].includes(actorRole);
+
+      const mayCreateManager =
+        role === "manager" && ["developer", "owner"].includes(actorRole);
+
+      const mayCreateOwner = role === "owner" && actorRole === "developer";
+
+      if (
+        !mayCreateWorker &&
+        !mayCreateAccountant &&
+        !mayCreateManager &&
+        !mayCreateOwner
+      ) {
+        throw httpError(403, "لا يمكنك إنشاء حساب بهذا الدور.");
+      }
+      const requestedManagerId = asText(req.body?.managerId) || null;
+      const created = await transaction(async (client) => {
+        await client.query("LOCK TABLE employees IN EXCLUSIVE MODE");
+        if (role === "developer") {
+          const existingDeveloper = await client.query(
+            "SELECT id FROM employees WHERE role='developer' LIMIT 1",
+          );
+          if (existingDeveloper.rowCount) {
+            throw httpError(
+              409,
+              "يوجد حساب مطور بالفعل؛ لا يمكن إنشاء حساب مطور آخر من هذه الصفحة.",
+            );
+          }
+        }
+        const duplicate = await client.query(
+          "SELECT id FROM employees WHERE name_key=$1 LIMIT 1",
+          [keyText(name)],
+        );
+        if (duplicate.rowCount)
+          throw httpError(409, "اسم الموظف مستخدم بالفعل.");
+        let managerId = null;
+        if (role === "developer") {
+          managerId = null;
+        } else if (role === "manager") {
+          managerId = req.employee.id;
+        } else if (req.employee.role === "manager") {
+          managerId = req.employee.id;
+        } else if (requestedManagerId) {
+          const manager = await client.query(
+            "SELECT id FROM employees WHERE id=$1 AND role='manager' AND is_active=TRUE",
+            [requestedManagerId],
+          );
+          if (!manager.rowCount)
+            throw httpError(400, "المدير المباشر المحدد غير صالح.");
+          managerId = manager.rows[0].id;
+        }
+        const hashed = await hashEmployeePin(pin);
+        const now = nowMs();
+        const id = newId("employee-");
+        const result = await client.query(
+          `INSERT INTO employees(id,name,name_key,role,pin_salt,pin_hash,manager_id,is_active,created_at,updated_at)
+           VALUES($1,$2,$3,$4,$5,$6,$7,TRUE,$8,$8)
+           RETURNING id,name,role,manager_id,is_active,created_at,updated_at`,
+          [
+            id,
+            name,
+            keyText(name),
+            role,
+            hashed.pinSalt,
+            hashed.pinHash,
+            managerId,
+            now,
+          ],
+        );
+        return result.rows[0];
+      });
+      res.status(201).json(employeeSafeRecord(created));
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.put(
+  "/api/employees/:id",
+  requireEmployeeSession,
+  requireEmployeeRoles("developer", "owner", "manager"),
+  async (req, res, next) => {
+    try {
+      const name = validateEmployeeName(req.body?.name);
+      const requestedRole = employeeRole(req.body?.role);
+      const actorWeight = ROLE_WEIGHTS[req.employee.role] || 1;
+      const targetWeight = ROLE_WEIGHTS[requestedRole] || 1;
+      if (targetWeight > actorWeight) {
+        throw httpError(
+          403,
+          "لا يمكنك ترقية أو تعيين موظف برتبة أعلى من رتبتك.",
+        );
+      }
+      const requestedManagerId = asText(req.body?.managerId) || null;
+      const requestedPin =
+        req.body?.pin == null || req.body?.pin === ""
+          ? null
+          : validateNewPin(req.body.pin);
+      const saved = await transaction(async (client) => {
+        await client.query("LOCK TABLE employees IN EXCLUSIVE MODE");
+        const targetResult = await client.query(
+          "SELECT id,name,role,manager_id,is_active FROM employees WHERE id=$1 FOR UPDATE",
+          [req.params.id],
+        );
+        if (!targetResult.rowCount) throw httpError(404, "الموظف غير موجود.");
+        const target = targetResult.rows[0];
+        const targetRole = employeeRole(target.role, { legacyFallback: true });
+        if (!["worker", "manager"].includes(targetRole)) {
+          throw httpError(
+            403,
+            "حساب المالك أو المطور محمي ولا يمكن تعديله من صفحة الموظفين.",
+          );
+        }
+        if (
+          req.employee.role === "manager" &&
+          (targetRole !== "worker" || target.manager_id !== req.employee.id)
+        ) {
+          throw httpError(403, "يمكن للمدير تعديل الموظفين التابعين له فقط.");
+        }
+        if (req.employee.role === "manager" && requestedRole !== "worker") {
+          throw httpError(403, "لا يمكن للمدير تغيير رتبة الموظف إلى مدير.");
+        }
+        if (
+          !["worker", "manager"].includes(requestedRole) ||
+          (requestedRole === "manager" && req.employee.role !== "owner")
+        ) {
+          throw httpError(403, "الدور المحدد غير مسموح به.");
+        }
+        if (requestedRole !== targetRole) {
+          const childCount = await client.query(
+            "SELECT COUNT(*)::int AS count FROM employees WHERE manager_id=$1",
+            [target.id],
+          );
+          if (Number(childCount.rows[0].count) > 0) {
+            throw httpError(
+              409,
+              "انقل الموظفين التابعين لهذا الحساب أولاً قبل تغيير دوره.",
+            );
+          }
+        }
+        const duplicate = await client.query(
+          "SELECT id FROM employees WHERE name_key=$1 AND id<>$2 LIMIT 1",
+          [keyText(name), target.id],
+        );
+        if (duplicate.rowCount)
+          throw httpError(409, "اسم الموظف مستخدم بالفعل.");
+
+        let managerId = target.manager_id || null;
+        if (requestedRole === "manager") {
+          managerId = req.employee.id;
+        } else if (req.employee.role === "manager") {
+          managerId = req.employee.id;
+        } else if (requestedManagerId) {
+          const manager = await client.query(
+            "SELECT id FROM employees WHERE id=$1 AND role='manager' AND is_active=TRUE",
+            [requestedManagerId],
+          );
+          if (!manager.rowCount)
+            throw httpError(400, "المدير المباشر المحدد غير صالح.");
+          managerId = manager.rows[0].id;
+        } else {
+          managerId = null;
+        }
+        let pinSalt = null;
+        let pinHash = null;
+        if (requestedPin) {
+          const hashed = await hashEmployeePin(requestedPin);
+          pinSalt = hashed.pinSalt;
+          pinHash = hashed.pinHash;
+        }
+        const now = nowMs();
+        const result = await client.query(
+          `UPDATE employees SET name=$2,name_key=$3,role=$4,manager_id=$5,
+             pin_salt=COALESCE($6,pin_salt),pin_hash=COALESCE($7,pin_hash),updated_at=$8
+           WHERE id=$1 RETURNING id,name,role,manager_id,is_active,created_at,updated_at`,
+          [
+            target.id,
+            name,
+            keyText(name),
+            requestedRole,
+            managerId,
+            pinSalt,
+            pinHash,
+            now,
+          ],
+        );
+        return result.rows[0];
+      });
+      res.json(employeeSafeRecord(saved));
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.delete(
+  "/api/employees/:id",
+  requireEmployeeSession,
+  requireEmployeeRoles("developer", "owner", "manager"),
+  async (req, res, next) => {
+    try {
+      const deleted = await transaction(async (client) => {
+        await client.query("LOCK TABLE employees IN EXCLUSIVE MODE");
+        const result = await client.query(
+          "SELECT id,name,role,manager_id FROM employees WHERE id=$1 FOR UPDATE",
+          [req.params.id],
+        );
+        if (!result.rowCount) throw httpError(404, "الموظف غير موجود.");
+        const target = result.rows[0];
+        const role = employeeRole(target.role, { legacyFallback: true });
+        if (!["worker", "manager"].includes(role)) {
+          throw httpError(
+            403,
+            "حساب المالك أو المطور محمي ولا يمكن حذفه من صفحة الموظفين.",
+          );
+        }
+        if (
+          req.employee.role === "manager" &&
+          (role !== "worker" || target.manager_id !== req.employee.id)
+        ) {
+          throw httpError(403, "يمكن للمدير حذف الموظفين التابعين له فقط.");
+        }
+        const children = await client.query(
+          "SELECT COUNT(*)::int AS count FROM employees WHERE manager_id=$1",
+          [target.id],
+        );
+        if (Number(children.rows[0].count) > 0) {
+          throw httpError(
+            409,
+            "انقل الموظفين التابعين لهذا الحساب أولاً قبل حذفه.",
+          );
+        }
+        const removed = await client.query(
+          "DELETE FROM employees WHERE id=$1 RETURNING id,name,role,manager_id,is_active,created_at,updated_at",
+          [target.id],
+        );
+        return removed.rows[0];
+      });
+      res.json({ ok: true, employee: employeeSafeRecord(deleted) });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 // Brands and their normalized series/models.
 app.get("/api/brands", async (_req, res, next) => {
@@ -1542,16 +2199,14 @@ app.post("/api/offers", async (req, res, next) => {
     const id = await transaction((client) => ensureOffer(client, req.body));
     const result = await pool.query("SELECT * FROM offers WHERE id=$1", [id]);
     const r = result.rows[0];
-    res
-      .status(201)
-      .json({
-        id: r.id,
-        name: r.name,
-        discountType: r.discount_type,
-        discountValue: Number(r.discount_value),
-        durationDays: Number(r.duration_days),
-        expiresAt: Number(r.expires_at),
-      });
+    res.status(201).json({
+      id: r.id,
+      name: r.name,
+      discountType: r.discount_type,
+      discountValue: Number(r.discount_value),
+      durationDays: Number(r.duration_days),
+      expiresAt: Number(r.expires_at),
+    });
   } catch (e) {
     next(e);
   }
@@ -1773,13 +2428,11 @@ app.post("/api/payments", async (req, res, next) => {
       );
       return { paymentId, saleId };
     });
-    res
-      .status(201)
-      .json({
-        ok: true,
-        paymentId: result.paymentId,
-        sale: await fetchSales({ id: result.saleId }),
-      });
+    res.status(201).json({
+      ok: true,
+      paymentId: result.paymentId,
+      sale: await fetchSales({ id: result.saleId }),
+    });
   } catch (e) {
     next(e);
   }
@@ -2016,41 +2669,33 @@ app.use((req, res) =>
 );
 app.use((error, _req, res, _next) => {
   if (error?.code === "23505") {
-    return res
-      .status(409)
-      .json({
-        error: "يوجد سجل بنفس المعرّف أو القيمة الفريدة بالفعل.",
-        code: error.code,
-        detail: error.detail,
-      });
+    return res.status(409).json({
+      error: "يوجد سجل بنفس المعرّف أو القيمة الفريدة بالفعل.",
+      code: error.code,
+      detail: error.detail,
+    });
   }
   if (error?.code === "23503") {
-    return res
-      .status(409)
-      .json({
-        error: "لا يمكن تنفيذ العملية لوجود سجلات مرتبطة بها.",
-        code: error.code,
-      });
+    return res.status(409).json({
+      error: "لا يمكن تنفيذ العملية لوجود سجلات مرتبطة بها.",
+      code: error.code,
+    });
   }
   if (error?.code === "23514" || error?.code === "22P02") {
-    return res
-      .status(400)
-      .json({
-        error: "البيانات المدخلة غير صحيحة.",
-        code: error.code,
-        detail: error.detail,
-      });
+    return res.status(400).json({
+      error: "البيانات المدخلة غير صحيحة.",
+      code: error.code,
+      detail: error.detail,
+    });
   }
   const status = Number(error?.status) || 500;
   if (status >= 500) console.error("API error:", error);
-  res
-    .status(status)
-    .json({
-      error: status >= 500 ? "حدث خطأ داخلي في الخادم." : error.message,
-      ...(process.env.NODE_ENV === "development" && error?.detail
-        ? { detail: error.detail }
-        : {}),
-    });
+  res.status(status).json({
+    error: status >= 500 ? "حدث خطأ داخلي في الخادم." : error.message,
+    ...(process.env.NODE_ENV === "development" && error?.detail
+      ? { detail: error.detail }
+      : {}),
+  });
 });
 
 async function start() {
@@ -2058,6 +2703,7 @@ async function start() {
   const schemaPath = fileURLToPath(new URL("./schema.sql", import.meta.url));
   const schema = await fs.readFile(schemaPath, "utf8");
   await pool.query(schema);
+  await migrateLegacyEmployees();
   const dbInfo = await pool.query(
     "SELECT current_database() AS database, current_user AS db_user, version() AS version",
   );
@@ -2071,7 +2717,7 @@ async function start() {
     );
     console.log(`Health check: http://127.0.0.1:${PORT}/api/health`);
     console.log(
-      "Tables: brands, brand_series, brand_models, customers, warehouse_batches, sale_items, sales, sale_installments, payments, returns",
+      "Tables: brands, brand_series, brand_models, customers, employees, warehouse_batches, sale_items, sales, sale_installments, payments, returns",
     );
     if (!API_TOKEN)
       console.warn(

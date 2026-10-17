@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as WarehouseRouteImport } from './routes/warehouse'
 import { Route as SalesRouteImport } from './routes/sales'
+import { Route as RolesRouteImport } from './routes/roles'
 import { Route as ReturnsHistoryRouteImport } from './routes/returns-history'
 import { Route as ReturnsRouteImport } from './routes/returns'
 import { Route as InvoicesRouteImport } from './routes/invoices'
@@ -26,6 +27,11 @@ const WarehouseRoute = WarehouseRouteImport.update({
 const SalesRoute = SalesRouteImport.update({
   id: '/sales',
   path: '/sales',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RolesRoute = RolesRouteImport.update({
+  id: '/roles',
+  path: '/roles',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ReturnsHistoryRoute = ReturnsHistoryRouteImport.update({
@@ -66,6 +72,7 @@ export interface FileRoutesByFullPath {
   '/invoices': typeof InvoicesRoute
   '/returns': typeof ReturnsRoute
   '/returns-history': typeof ReturnsHistoryRoute
+  '/roles': typeof RolesRoute
   '/sales': typeof SalesRoute
   '/warehouse': typeof WarehouseRoute
 }
@@ -76,6 +83,7 @@ export interface FileRoutesByTo {
   '/invoices': typeof InvoicesRoute
   '/returns': typeof ReturnsRoute
   '/returns-history': typeof ReturnsHistoryRoute
+  '/roles': typeof RolesRoute
   '/sales': typeof SalesRoute
   '/warehouse': typeof WarehouseRoute
 }
@@ -87,6 +95,7 @@ export interface FileRoutesById {
   '/invoices': typeof InvoicesRoute
   '/returns': typeof ReturnsRoute
   '/returns-history': typeof ReturnsHistoryRoute
+  '/roles': typeof RolesRoute
   '/sales': typeof SalesRoute
   '/warehouse': typeof WarehouseRoute
 }
@@ -99,6 +108,7 @@ export interface FileRouteTypes {
     | '/invoices'
     | '/returns'
     | '/returns-history'
+    | '/roles'
     | '/sales'
     | '/warehouse'
   fileRoutesByTo: FileRoutesByTo
@@ -109,6 +119,7 @@ export interface FileRouteTypes {
     | '/invoices'
     | '/returns'
     | '/returns-history'
+    | '/roles'
     | '/sales'
     | '/warehouse'
   id:
@@ -119,6 +130,7 @@ export interface FileRouteTypes {
     | '/invoices'
     | '/returns'
     | '/returns-history'
+    | '/roles'
     | '/sales'
     | '/warehouse'
   fileRoutesById: FileRoutesById
@@ -130,6 +142,7 @@ export interface RootRouteChildren {
   InvoicesRoute: typeof InvoicesRoute
   ReturnsRoute: typeof ReturnsRoute
   ReturnsHistoryRoute: typeof ReturnsHistoryRoute
+  RolesRoute: typeof RolesRoute
   SalesRoute: typeof SalesRoute
   WarehouseRoute: typeof WarehouseRoute
 }
@@ -148,6 +161,13 @@ declare module '@tanstack/react-router' {
       path: '/sales'
       fullPath: '/sales'
       preLoaderRoute: typeof SalesRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/roles': {
+      id: '/roles'
+      path: '/roles'
+      fullPath: '/roles'
+      preLoaderRoute: typeof RolesRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/returns-history': {
@@ -202,6 +222,7 @@ const rootRouteChildren: RootRouteChildren = {
   InvoicesRoute: InvoicesRoute,
   ReturnsRoute: ReturnsRoute,
   ReturnsHistoryRoute: ReturnsHistoryRoute,
+  RolesRoute: RolesRoute,
   SalesRoute: SalesRoute,
   WarehouseRoute: WarehouseRoute,
 }

@@ -89,7 +89,7 @@ export default function SearchSelect({
               setQuery(value);
             }
           }}
-          className="w-full rounded-xl border border-gray-200 bg-white py-3 pr-10 pl-10 text-sm text-gray-800 outline-none transition placeholder:text-gray-400 focus:border-emerald-500 focus:ring-4 focus:ring-emerald-500/10 disabled:bg-gray-100"
+          className="app-input w-full rounded-lg border border-slate-300 bg-white py-2.5 pr-10 pl-10 text-sm font-medium text-slate-900 outline-none placeholder:text-slate-500 focus:border-emerald-700 focus:ring-2 focus:ring-emerald-700/15 disabled:bg-slate-100"
         />
 
         {query && !disabled ? (

@@ -1,14 +1,10 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { api } from "../lib/api-client";
+import { formatMoney, formatNumber } from "../lib/format";
+import { PageHeader, StatCard } from "../components/ui/app-chrome";
 import {
-  ArrowDownLeft,
-  ArrowLeft,
-  ArrowUpLeft,
   Banknote,
-  Bell,
-  Boxes,
-  ChartNoAxesCombined,
   ChevronLeft,
   CirclePlus,
   CreditCard,
@@ -30,59 +26,25 @@ export const Route = createFileRoute("/")({
   component: Dashboard,
 });
 
-const stats = [
-  {
-    title: "إجمالي المبيعات",
-    value: "—",
-    note: "سيظهر بعد ربط قاعدة البيانات",
-    icon: Banknote,
-    color: "bg-emerald-50 text-emerald-700",
-  },
-  {
-    title: "أجهزة في المخزون",
-    value: "—",
-    note: "كل جهاز مسجل برقم IMEI",
-    icon: Smartphone,
-    color: "bg-blue-50 text-blue-700",
-  },
-  {
-    title: "مبالغ مستحقة",
-    value: "—",
-    note: "الأقساط والبيع الآجل",
-    icon: Wallet,
-    color: "bg-amber-50 text-amber-700",
-  },
-  {
-    title: "عدد العملاء",
-    value: "—",
-    note: "إجمالي العملاء المسجلين",
-    icon: Users,
-    color: "bg-violet-50 text-violet-700",
-  },
-];
-
 const shortcuts = [
   {
     title: "فاتورة بيع جديدة",
-    description: "بيع موبايل أو إكسسوار",
+    description: "تسجيل بيع كاش أو آجل أو تقسيط",
     icon: CirclePlus,
     to: "/sales" as const,
-    color: "bg-emerald-50 text-emerald-700",
   },
   {
     title: "إدارة المخزون",
-    description: "عرض الأصناف والأجهزة",
+    description: "استلام الدفعات ومتابعة الرصيد",
     icon: Smartphone,
     to: "/warehouse" as const,
-    color: "bg-violet-50 text-violet-700",
   },
-  // {
-  //   title: "التقارير",
-  //   description: "مراجعة حركة البيع والمخزون",
-  //   icon: ChartNoAxesCombined,
-  //   to: "/reports" as const,
-  //   color: "bg-amber-50 text-amber-700",
-  // },
+  {
+    title: "الأقساط",
+    description: "متابعة العقود والتحصيل",
+    icon: CreditCard,
+    to: "/installlments" as const,
+  },
 ];
 
 function Dashboard() {
@@ -111,190 +73,139 @@ function Dashboard() {
       cancelled = true;
     };
   }, []);
-  const displayStats = stats.map((stat, index) => ({
-    ...stat,
-    value: backendStats
-      ? [
-          new Intl.NumberFormat("ar-EG", {
-            style: "currency",
-            currency: "EGP",
-            maximumFractionDigits: 0,
-          }).format(backendStats.salesTotal),
-          new Intl.NumberFormat("ar-EG").format(backendStats.unitsAvailable),
-          new Intl.NumberFormat("ar-EG", {
-            style: "currency",
-            currency: "EGP",
-            maximumFractionDigits: 0,
-          }).format(backendStats.outstanding),
-          new Intl.NumberFormat("ar-EG").format(backendStats.customersCount),
-        ][index]
-      : "—",
-  }));
+
+  const displayStats = [
+    {
+      title: "إجمالي المبيعات",
+      value: backendStats ? formatMoney(backendStats.salesTotal) : "—",
+      note: backendStats
+        ? `${formatNumber(backendStats.salesCount)} فاتورة مسجلة`
+        : "سيظهر بعد الاتصال بقاعدة البيانات",
+      icon: Banknote,
+      tone: "success" as const,
+    },
+    {
+      title: "أجهزة في المخزون",
+      value: backendStats ? formatNumber(backendStats.unitsAvailable) : "—",
+      note: "الوحدات المتاحة للبيع",
+      icon: Smartphone,
+      tone: "info" as const,
+    },
+    {
+      title: "مبالغ مستحقة",
+      value: backendStats ? formatMoney(backendStats.outstanding) : "—",
+      note: "الأقساط والبيع الآجل",
+      icon: Wallet,
+      tone: "warning" as const,
+    },
+    {
+      title: "عدد العملاء",
+      value: backendStats ? formatNumber(backendStats.customersCount) : "—",
+      note: "العملاء المسجلون في النظام",
+      icon: Users,
+      tone: "neutral" as const,
+    },
+  ];
+
   return (
-    <main dir="rtl" className="mx-auto w-full max-w-[1600px] space-y-7 pb-8">
-      <div className="flex flex-col justify-between gap-4 sm:flex-row sm:items-center">
-        <div>
-          <div className="mb-2 flex items-center gap-2 text-sm text-muted-foreground">
-            <span>الرئيسية</span>
-            <ChevronLeft size={15} />
-            <span className="text-foreground">لوحة التحكم</span>
+    <div dir="rtl" className="space-y-6">
+      <PageHeader
+        title="نظرة عامة على المحل"
+        description="ملخص يومي للمبيعات، المخزون، والمستحقات من قاعدة البيانات المشتركة."
+        actions={
+          <div className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm">
+            <span
+              className={`h-2 w-2 rounded-full ${apiReady ? "bg-emerald-600" : "bg-amber-500"}`}
+            />
+            <span className="text-slate-700">
+              {apiReady
+                ? "متصل بقاعدة البيانات المشتركة"
+                : "تعذر الاتصال بقاعدة البيانات"}
+            </span>
           </div>
+        }
+      />
 
-          <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
-            أهلاً بيك 👋
-          </h1>
-          <p className="mt-2 text-sm text-muted-foreground sm:text-base">
-            دي نظرة عامة على إدارة محل الموبايلات.
-          </p>
-        </div>
-
-        <div className="flex items-center gap-2 self-start rounded-xl border bg-card px-3 py-2 text-sm">
-          <span className="h-2 w-2 rounded-full bg-amber-500" />
-          <span className="text-muted-foreground">
-            {apiReady
-              ? "متصل بقاعدة البيانات المشتركة"
-              : "تعذر الاتصال بقاعدة البيانات"}
-          </span>
-        </div>
-      </div>
-
-      <section className="relative overflow-hidden rounded-2xl bg-[#102b25] p-6 text-white sm:p-8">
-        <div className="pointer-events-none absolute -left-12 -top-20 h-64 w-64 rounded-full bg-emerald-400/10 blur-3xl" />
-
-        <div className="relative flex flex-col justify-between gap-6 md:flex-row md:items-center">
+      <section className="rounded-xl border border-slate-200 bg-[#123b32] p-5 text-white sm:p-6">
+        <div className="flex flex-col justify-between gap-5 md:flex-row md:items-center">
           <div className="max-w-xl">
-            <div className="mb-3 flex items-center gap-2 text-sm text-emerald-300">
-              <Smartphone size={18} />
-              <span>BMO MOBILE MANAGEMENT</span>
-            </div>
-
-            <h2 className="text-2xl font-bold leading-relaxed sm:text-3xl">
-              كل تفاصيل محلك،
-              <br />
-              في مكان واحد.
-            </h2>
-
-            <p className="mt-3 max-w-md text-sm leading-7 text-white/70">
-              تابع الأجهزة بأرقام IMEI، وإدارة الإكسسوارات والمبيعات والعملاء
-              والأقساط من خلال نظام واحد.
+            <p className="mb-2 text-sm font-semibold text-emerald-200">
+              BMO Mobile
             </p>
-
+            <h2 className="text-xl font-bold leading-relaxed sm:text-2xl">
+              المخزون والمبيعات والحسابات في مكان واحد
+            </h2>
+            <p className="mt-2 max-w-md text-sm leading-7 text-white/80">
+              تابع الأجهزة بأرقام IMEI، سجّل الفواتير، وراجع الأقساط والمرتجعات
+              دون تكرار البيانات.
+            </p>
             <Link
               to="/warehouse"
-              className="mt-5 inline-flex items-center gap-2 rounded-xl bg-white px-4 py-3 text-sm font-bold text-[#102b25] transition hover:bg-emerald-50"
+              className="mt-4 inline-flex items-center gap-2 rounded-lg bg-white px-4 py-2.5 text-sm font-bold text-[#123b32] hover:bg-emerald-50"
             >
-              استكشف المخزون
-              <ArrowLeft size={17} />
+              فتح المخزن
+              <ChevronLeft size={16} />
             </Link>
           </div>
-
-          <div className="hidden h-36 w-36 shrink-0 items-center justify-center rounded-[2rem] border border-white/10 bg-white/5 md:flex">
-            <Smartphone
-              size={76}
-              strokeWidth={1.1}
-              className="text-emerald-300"
-            />
+          <div className="hidden h-28 w-28 shrink-0 items-center justify-center rounded-xl border border-white/15 bg-white/5 md:flex">
+            <Smartphone size={56} strokeWidth={1.25} className="text-emerald-200" />
           </div>
         </div>
       </section>
 
       <section>
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <h2 className="text-lg font-bold">ملخص النشاط</h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              مؤشرات مباشرة من قاعدة بيانات المحل المشتركة.
-            </p>
-          </div>
+        <div className="mb-3">
+          <h2 className="text-base font-bold text-slate-900">ملخص النشاط</h2>
+          <p className="mt-1 text-sm text-slate-600">
+            مؤشرات مباشرة من قاعدة بيانات المحل.
+          </p>
         </div>
-
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-4">
           {displayStats.map((stat) => {
             const Icon = stat.icon;
-
             return (
-              <article
+              <StatCard
                 key={stat.title}
-                className="rounded-2xl border border-border bg-card p-5 transition duration-200 hover:-translate-y-1 hover:shadow-md"
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="text-sm text-muted-foreground">
-                      {stat.title}
-                    </p>
-                    <p className="mt-4 text-3xl font-bold tracking-tight">
-                      {stat.value}
-                    </p>
-                  </div>
-
-                  <div className={`rounded-xl p-3 ${stat.color}`}>
-                    <Icon size={22} />
-                  </div>
-                </div>
-
-                <p className="mt-4 text-xs leading-6 text-muted-foreground">
-                  {stat.note}
-                </p>
-              </article>
+                title={stat.title}
+                value={stat.value}
+                note={stat.note}
+                icon={<Icon size={20} />}
+                tone={stat.tone}
+              />
             );
           })}
         </div>
       </section>
 
       <section>
-        <div className="mb-4">
-          <h2 className="text-lg font-bold">الوصول السريع</h2>
-          <p className="mt-1 text-sm text-muted-foreground">
-            اختار العملية اللي عايز تبدأ بيها.
-          </p>
+        <div className="mb-3">
+          <h2 className="text-base font-bold text-slate-900">الوصول السريع</h2>
+          <p className="mt-1 text-sm text-slate-600">ابدأ العملية اليومية مباشرة.</p>
         </div>
-
-        <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 xl:grid-cols-3">
           {shortcuts.map((item) => {
             const Icon = item.icon;
-
             return (
               <Link
                 key={item.title}
                 to={item.to}
-                className="group flex items-center gap-4 rounded-2xl border border-border bg-card p-5 transition hover:border-emerald-600/40 hover:shadow-md"
+                className="flex items-center gap-4 rounded-xl border border-slate-200 bg-white p-4 hover:border-emerald-700 hover:bg-emerald-50/40"
               >
-                <div className={`shrink-0 rounded-xl p-3 ${item.color}`}>
-                  <Icon size={23} />
+                <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-800">
+                  <Icon size={20} />
                 </div>
-
                 <div className="min-w-0 flex-1">
-                  <h3 className="font-bold">{item.title}</h3>
-                  <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                  <h3 className="font-bold text-slate-900">{item.title}</h3>
+                  <p className="mt-1 text-sm leading-6 text-slate-600">
                     {item.description}
                   </p>
                 </div>
-
-                <ChevronLeft
-                  size={18}
-                  className="shrink-0 text-muted-foreground transition group-hover:-translate-x-1 group-hover:text-emerald-700"
-                />
+                <ChevronLeft size={18} className="shrink-0 text-slate-500" />
               </Link>
             );
           })}
         </div>
       </section>
-
-      <section className="rounded-2xl border border-dashed border-border bg-card p-6">
-        <div className="flex items-start gap-4">
-          <div className="rounded-xl bg-muted p-3">
-            <CreditCard size={23} />
-          </div>
-
-          <div className="flex-1">
-            <h2 className="font-bold">المبيعات والأقساط</h2>
-            <p className="mt-2 max-w-2xl text-sm leading-7 text-muted-foreground">
-              هنجهّز دورة بيع تدعم الكاش والآجل والتقسيط، مع تسجيل المدفوعات
-              والمتبقي على كل فاتورة، وربط كل جهاز برقم IMEI لمنع بيعه مرتين.
-            </p>
-          </div>
-        </div>
-      </section>
-    </main>
+    </div>
   );
 }

@@ -69,23 +69,20 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       meta: [
         { charSet: "utf-8" },
         { name: "viewport", content: "width=device-width, initial-scale=1" },
-        { title: "مخزن" },
+        { title: "BMO Mobile" },
         {
           name: "description",
-          content:
-            "نظام إدارة المخزون للمطاعم - تتبع الأصناف، أذونات التوريد والصرف، والتقارير.",
+          content: "نظام إدارة محل الموبايلات: المخزون، المبيعات، الأقساط والمرتجعات.",
         },
-        { property: "og:title", content: "مخزن" },
-        { name: "twitter:title", content: "مخزن" },
+        { property: "og:title", content: "BMO Mobile" },
+        { name: "twitter:title", content: "BMO Mobile" },
         {
           property: "og:description",
-          content:
-            "نظام إدارة المخزون للمطاعم - تتبع الأصناف، أذونات التوريد والصرف، والتقارير.",
+          content: "نظام إدارة محل الموبايلات: المخزون، المبيعات، الأقساط والمرتجعات.",
         },
         {
           name: "twitter:description",
-          content:
-            "نظام إدارة المخزون للمطاعم - تتبع الأصناف، أذونات التوريد والصرف، والتقارير.",
+          content: "نظام إدارة محل الموبايلات: المخزون، المبيعات، الأقساط والمرتجعات.",
         },
         {
           property: "og:image",
@@ -102,16 +99,6 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       ],
       links: [
         { rel: "stylesheet", href: appCss },
-        { rel: "preconnect", href: "https://fonts.googleapis.com" },
-        {
-          rel: "preconnect",
-          href: "https://fonts.gstatic.com",
-          crossOrigin: "anonymous",
-        },
-        {
-          rel: "stylesheet",
-          href: "https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&display=swap",
-        },
       ],
     }),
     shellComponent: RootShell,

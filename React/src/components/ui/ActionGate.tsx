@@ -1,5 +1,5 @@
 /* eslint-disable prettier/prettier */
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import {
   Dialog,
   DialogContent,
@@ -8,144 +8,175 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
-import { getApiUrl } from "@/api";
+import { Input } from "@/components/ui/input";
+import { Button } from "@/components/ui/button";
+import { api, type EmployeeRecord, type EmployeeRole } from "@/lib/api-client";
+import { ShieldCheck } from "lucide-react";
 
-// 🌟 السحر هنا: استخدمنا الدالة بدل اللينك الثابت
-const API_URL = getApiUrl();
-
-// 🌟 الحل: تم إضافة "مالك" هنا في الأنواع المسموحة
-export type EmployeeRole =
-  | "مالك"
-  | "مبرمج"
-  | "مدير"
-  | "محاسب"
-  | "كاشير"
-  | "كابتن صالة";
-
-interface Employee {
-  id: string;
-  name: string;
-  role: EmployeeRole;
-  pinHash: string;
-  pin?: string;
-}
-
-interface ActionGateProps {
+type ActionGateProps = {
   children: React.ReactNode;
   requiredRole?: EmployeeRole;
   actionName?: string;
-  onSuccess: (employee: Employee) => void;
-}
+  onSuccess: (employee: EmployeeRecord) => void;
+};
 
-const ROLE_WEIGHTS: Record<EmployeeRole, number> = {
-  مالك: 5,
-  مبرمج: 4,
-  مدير: 3,
-  محاسب: 2,
-  كاشير: 1,
-  "كابتن صالة": 1,
+const ROLE_WEIGHT: Record<EmployeeRole, number> = {
+  worker: 1,
+  accountant: 2,
+  manager: 3,
+  owner: 4,
+  developer: 5,
+};
+
+const ROLE_LABEL: Record<EmployeeRole, string> = {
+  worker: "عامل / موظف",
+  accountant: "محاسب",
+  manager: "مدير",
+  owner: "مالك",
+  developer: "مطور",
 };
 
 export default function ActionGate({
   children,
-  requiredRole = "محاسب",
+  requiredRole = "accountant",
   actionName = "هذا الإجراء",
   onSuccess,
 }: ActionGateProps) {
-  const [isOpen, setIsOpen] = useState<boolean>(false);
-  const [pin, setPin] = useState<string>("");
-  const [error, setError] = useState<string>("");
-  const [employees, setEmployees] = useState<Employee[]>([]);
+  const [isOpen, setIsOpen] = useState(false);
+  const [pin, setPin] = useState("");
+  const [error, setError] = useState("");
+  const [isVerifying, setIsVerifying] = useState(false);
 
-  useEffect(() => {
-    if (isOpen && employees.length === 0) {
-      fetch(`http://${API_URL}:5000/api/employees`)
-        .then((res) => res.json())
-        .then((data: Employee[]) => setEmployees(data))
-        .catch((err) => console.error("Error fetching employees:", err));
-    }
-  }, [isOpen, employees.length]);
-
-  const handleVerify = () => {
+  function close() {
+    setIsOpen(false);
+    setPin("");
     setError("");
+  }
 
-    // 🌟 التعديل هنا: بنقارن الـ pin المدخل بالـ pin الصافي اللي جاي من السيرفر، أو الـ pinHash كزيادة أمان
-    const employee = employees.find(
-      (emp) => emp.pin === pin || emp.pinHash === pin,
-    );
+  async function handleVerify(event?: React.FormEvent<HTMLFormElement>) {
+    event?.preventDefault();
 
-    if (!employee) {
-      setError("الرقم السري غير صحيح!");
-      return;
-    }
+    if (isVerifying) return;
 
-    const requiredWeight = ROLE_WEIGHTS[requiredRole] || 1;
-    const employeeWeight = ROLE_WEIGHTS[employee.role] || 0;
+    setError("");
+    setIsVerifying(true);
 
-    if (employeeWeight >= requiredWeight) {
-      setIsOpen(false);
-      setPin("");
+    try {
+      const session = await api.authenticateEmployeeByPin(pin);
+      const employee = session.employee;
+
+      if (
+        (ROLE_WEIGHT[employee.role] ?? 0) < (ROLE_WEIGHT[requiredRole] ?? 0)
+      ) {
+        api.clearEmployeeSessionAuthorization();
+
+        setError(
+          `صلاحياتك لا تسمح بتنفيذ الإجراء. المطلوب: ${
+            ROLE_LABEL[requiredRole]
+          } أو أعلى.`,
+        );
+        setPin("");
+        return;
+      }
+      api.setEmployeeSessionAuthorization(session.token);
+
+      close();
       onSuccess(employee);
-    } else {
-      setError(`صلاحياتك لا تسمح بإجراء هذه العملية. مطلوب: ${requiredRole}`);
+    } catch (verifyError) {
+      api.clearEmployeeSessionAuthorization();
+
+      setError(
+        verifyError instanceof Error
+          ? verifyError.message
+          : "تعذر التحقق من الرقم السري.",
+      );
+      setPin("");
+    } finally {
+      setIsVerifying(false);
     }
-  };
+  }
 
   return (
     <>
       <div
-        onClick={() => setIsOpen(true)}
+        onClick={() => {
+          setError("");
+          setIsOpen(true);
+        }}
         className="inline-block cursor-pointer"
       >
         {children}
       </div>
 
-      <Dialog open={isOpen} onOpenChange={setIsOpen}>
-        <DialogContent dir="rtl">
+      <Dialog
+        open={isOpen}
+        onOpenChange={(open) => {
+          if (!open) close();
+          else setIsOpen(true);
+        }}
+      >
+        <DialogContent dir="rtl" className="sm:max-w-md">
           <DialogHeader>
-            <DialogTitle>صلاحية مطلوبة</DialogTitle>
+            <DialogTitle className="flex items-center gap-2">
+              <ShieldCheck className="h-5 w-5 text-primary" />
+              تأكيد الصلاحية
+            </DialogTitle>
+
             <DialogDescription>
-              لإتمام ({actionName})، يرجى إدخال الرقم السري لموظف بصلاحية{" "}
-              {requiredRole} أو أعلى.
+              لتنفيذ «{actionName}»، أدخل الرقم السري. سيحدد النظام رتبتك ويتحقق
+              من صلاحيتك تلقائيًا. الرتب الأعلى تستطيع تنفيذ الإجراءات المسموحة
+              للرتب الأقل.
             </DialogDescription>
           </DialogHeader>
 
-          <div className="py-4">
-            <input
-              type="password"
-              inputMode="numeric"
-              value={pin}
-              onChange={(e) => setPin(e.target.value)}
-              placeholder="أدخل الـ PIN هنا..."
-              className="w-full border rounded p-2 text-center text-xl tracking-widest bg-background text-foreground"
-              autoFocus
-              onKeyDown={(e) => {
-                if (e.key === "Enter") handleVerify();
-              }}
-            />
+          <form onSubmit={handleVerify} className="space-y-4 py-2">
+            <div className="space-y-1.5">
+              <label className="text-sm font-medium">الرقم السري (PIN)</label>
+
+              <Input
+                type="password"
+                inputMode="numeric"
+                autoComplete="off"
+                autoFocus
+                value={pin}
+                onChange={(event) =>
+                  setPin(event.target.value.replace(/\D/g, "").slice(0, 12))
+                }
+                required
+                minLength={4}
+                placeholder="أدخل الرقم السري"
+              />
+            </div>
+
             {error && (
-              <p className="text-destructive text-sm mt-2 text-center font-medium">
+              <p
+                role="alert"
+                className="rounded-lg border border-destructive/30 bg-destructive/5 p-2.5 text-center text-sm text-destructive"
+              >
                 {error}
               </p>
             )}
-          </div>
 
-          <DialogFooter className="gap-2 sm:gap-0">
-            <button
-              type="button"
-              onClick={() => setIsOpen(false)}
-              className="bg-secondary text-foreground p-2 rounded px-4 w-full sm:w-auto"
-            >
-              إلغاء
-            </button>
-            <button
-              type="button"
-              onClick={handleVerify}
-              className="bg-primary text-primary-foreground p-2 rounded px-4 w-full sm:w-auto mt-2 sm:mt-0"
-            >
-              تأكيد
-            </button>
-          </DialogFooter>
+            <DialogFooter className="gap-2">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={close}
+                disabled={isVerifying}
+              >
+                إلغاء
+              </Button>
+
+              <Button
+                type="submit"
+                disabled={isVerifying || pin.length < 4}
+                className="gap-2"
+              >
+                <ShieldCheck className="h-4 w-4" />
+                {isVerifying ? "جارٍ التحقق..." : "تأكيد"}
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
     </>
