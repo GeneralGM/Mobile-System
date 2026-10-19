@@ -476,6 +476,30 @@ export const api = {
       unitsAvailable: number;
       customersCount: number;
     }>("/api/stats"),
+
+  getAccessoryCategories: () =>
+    request<Array<{ id: string; name: string }>>("/api/accessory-categories"),
+  saveAccessoryCategory: (name: string) =>
+    request<{ id: string; name: string }>(
+      "/api/accessory-categories",
+      json("POST", { name }),
+    ),
+  getAccessoryBrands: () =>
+    request<Array<{ id: string; name: string }>>("/api/accessory-brands"),
+  saveAccessoryBrand: (name: string) =>
+    request<{ id: string; name: string }>(
+      "/api/accessory-brands",
+      json("POST", { name }),
+    ),
+  getAccessoryBatches: (q?: string) =>
+    request<AccessoryBatchRecord[]>(
+      `/api/accessory-batches${q ? `?q=${encodeURIComponent(q)}` : ""}`,
+    ),
+  createAccessoryBatch: (batch: AccessoryBatchRecord) =>
+    request<AccessoryBatchRecord>(
+      "/api/accessory-batches",
+      json("POST", batch),
+    ),
 };
 
 export type BrandRecord = {
@@ -496,6 +520,23 @@ export type WarehouseBatchRecord = {
   supplierName: string;
   receivedAt: number;
   imeis: string[];
+};
+export type AccessoryBatchRecord = {
+  id: string;
+  itemType: "accessory";
+  category: string;
+  brand: string;
+  productName: string;
+  model: string;
+  compatibleModel?: string;
+  variantType?: string;
+  variantValue?: string;
+  receivedQuantity: number;
+  availableQuantity: number;
+  unitCost: number;
+  salePrice: number;
+  supplierName: string;
+  receivedAt: number;
 };
 export type DeviceRecord = {
   id: string;
@@ -549,6 +590,13 @@ export type SaleItemRecord = {
   unitCost?: number;
   isNewStock?: boolean;
   returnedQuantity?: number;
+  itemType?: "mobile" | "accessory";
+  accessoryBatchId?: string;
+  accessoryCategory?: string;
+  accessoryBrand?: string;
+  compatibleModel?: string;
+  variantType?: string;
+  variantValue?: string;
 };
 export type SaleRecord = {
   id: string;
