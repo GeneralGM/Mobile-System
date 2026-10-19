@@ -476,6 +476,45 @@ async function resolveCatalog(client, brandName, seriesName, modelName) {
   const model = await ensureModel(client, brand.id, series.id, modelName);
   return { brandId: brand.id, seriesId: series.id, modelId: model.id };
 }
+function serializeAccessoryBatch(row) {
+  return {
+    id: row.id,
+    itemType: "accessory",
+    category: row.category_name,
+    brand: row.brand_name,
+    productName: row.product_name,
+    model: row.product_name,
+    compatibleModel: row.compatible_model || "",
+    variantType: row.variant_type || "",
+    variantValue: row.variant_value || "",
+    receivedQuantity: Number(row.received_quantity),
+    availableQuantity: Number(row.available_quantity),
+    unitCost: Number(row.unit_cost),
+    salePrice: Number(row.sale_price),
+    supplierName: row.supplier_name || "",
+    receivedAt: Number(row.received_at),
+  };
+}
+
+async function upsertAccessoryName(client, table, prefix, value) {
+  if (!["accessory_categories", "accessory_brands"].includes(table)) {
+    throw httpError(400, "نوع البيانات غير صحيح.");
+  }
+
+  const name = asText(value);
+  if (!name) throw httpError(400, "الاسم مطلوب.");
+
+  const result = await client.query(
+    `INSERT INTO ${table} (id, name, name_key)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (name_key)
+     DO UPDATE SET name = EXCLUDED.name
+     RETURNING id, name`,
+    [newId(prefix), name, keyText(name)],
+  );
+
+  return result.rows[0];
+}
 async function ensureOffer(client, input) {
   if (!input || typeof input !== "object") return null;
   const name = asText(input.name);
@@ -834,6 +873,13 @@ function serializeSaleItem(row) {
     unitCost: Number(row.unit_cost),
     isNewStock: Boolean(row.is_new_stock),
     returnedQuantity: Number(row.returned_quantity || 0),
+    itemType: row.item_type === "accessory" ? "accessory" : "mobile",
+    accessoryBatchId: row.accessory_batch_id || undefined,
+    accessoryCategory: row.accessory_category || undefined,
+    accessoryBrand: row.accessory_brand || undefined,
+    compatibleModel: row.compatible_model || undefined,
+    variantType: row.variant_type || undefined,
+    variantValue: row.variant_value || undefined,
   };
 }
 function serializeInstallment(row) {
@@ -984,6 +1030,17 @@ async function createSale(
       unitCost: money(asNumber(item?.unitCost)),
       isNewStock: Boolean(item?.isNewStock),
       chosenPrice,
+      itemType:
+        asText(item?.itemType, "mobile") === "accessory"
+          ? "accessory"
+          : "mobile",
+
+      accessoryBatchId: asText(item?.accessoryBatchId) || null,
+      accessoryCategory: asText(item?.accessoryCategory || item?.category),
+      accessoryBrand: asText(item?.accessoryBrand || item?.brand),
+      compatibleModel: asText(item?.compatibleModel),
+      variantType: asText(item?.variantType),
+      variantValue: asText(item?.variantValue),
     };
   });
   calculatedTotal = money(calculatedTotal);
@@ -1053,6 +1110,39 @@ async function createSale(
   if (!inserted.rowCount) return id;
 
   for (const item of normalizedItems) {
+    if (updateStock && item.itemType === "accessory") {
+      if (!item.accessoryBatchId) {
+        throw httpError(400, "دفعة الإكسسوار مطلوبة لإتمام البيع.");
+      }
+
+      const batchRes = await client.query(
+        `SELECT available_quantity
+     FROM accessory_batches
+     WHERE id = $1
+     FOR UPDATE`,
+        [item.accessoryBatchId],
+      );
+
+      if (!batchRes.rowCount) {
+        throw httpError(404, "دفعة الإكسسوار غير موجودة.");
+      }
+
+      const available = Number(batchRes.rows[0].available_quantity);
+
+      if (available < item.quantity) {
+        throw httpError(
+          409,
+          `الكمية المتاحة من الإكسسوار هي ${available} فقط.`,
+        );
+      }
+
+      await client.query(
+        `UPDATE accessory_batches
+     SET available_quantity = available_quantity - $2
+     WHERE id = $1`,
+        [item.accessoryBatchId, item.quantity],
+      );
+    }
     if (updateStock && item.batchId) {
       const batchRes = await client.query(
         "SELECT available_quantity FROM warehouse_batches WHERE id=$1 FOR UPDATE",
@@ -1092,8 +1182,14 @@ async function createSale(
         );
     }
     await client.query(
-      `INSERT INTO sale_items(id,sale_id,line_number,brand,series,model,color,ram,storage,original_price,cash_price,installment_price,cash_final_price,installment_final_price,final_price,offer_name,quantity,warehouse_batch_id,unit_cost,is_new_stock)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20) ON CONFLICT(id) DO NOTHING`,
+      `INSERT INTO sale_items(id,sale_id,line_number,brand,series,model,color,ram,storage,original_price,cash_price,installment_price,cash_final_price,installment_final_price,final_price,offer_name,quantity,warehouse_batch_id,unit_cost,is_new_stock,item_type,
+accessory_batch_id,
+accessory_category,
+accessory_brand,
+compatible_model,
+variant_type,
+variant_value)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27) ON CONFLICT(id) DO NOTHING`,
       [
         item.id,
         id,
@@ -1115,6 +1211,13 @@ async function createSale(
         item.batchId,
         item.unitCost,
         item.isNewStock,
+        item.itemType,
+        item.accessoryBatchId,
+        item.accessoryCategory,
+        item.accessoryBrand,
+        item.compatibleModel,
+        item.variantType,
+        item.variantValue,
       ],
     );
   }
@@ -1306,6 +1409,20 @@ async function createReturn(client, input) {
     }
     appliedReduction = money(wantedReduction - toReduce);
     newRemaining = money(Math.max(0, remaining - appliedReduction));
+  }
+  // رجّع الإكسسوار للمخزون فقط إذا كانت القطعة المرتجعة سليمة.
+  if (
+    condition === "sound" &&
+    item.item_type === "accessory" &&
+    item.accessory_batch_id
+  ) {
+    await client.query(
+      `UPDATE accessory_batches
+     SET available_quantity =
+       LEAST(received_quantity, available_quantity + $2)
+     WHERE id = $1`,
+      [item.accessory_batch_id, quantity],
+    );
   }
   const customerRefund = money(Math.max(0, net - appliedReduction));
   const returnId = asText(input?.returnId) || newId("RET-");
@@ -2530,6 +2647,178 @@ app.get("/api/stats", async (_req, res, next) => {
       returnsCount: Number(returns.rows[0].count),
       returnsTotal: Number(returns.rows[0].total),
     });
+  } catch (e) {
+    next(e);
+  }
+});
+// Accessory categories
+app.get("/api/accessory-categories", async (_req, res, next) => {
+  try {
+    const result = await pool.query(
+      "SELECT id, name FROM accessory_categories ORDER BY name",
+    );
+    res.json(result.rows);
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.post("/api/accessory-categories", async (req, res, next) => {
+  try {
+    const row = await transaction((client) =>
+      upsertAccessoryName(
+        client,
+        "accessory_categories",
+        "accessory-category-",
+        req.body?.name,
+      ),
+    );
+    res.status(201).json(row);
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Accessory brands
+app.get("/api/accessory-brands", async (_req, res, next) => {
+  try {
+    const result = await pool.query(
+      "SELECT id, name FROM accessory_brands ORDER BY name",
+    );
+    res.json(result.rows);
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.post("/api/accessory-brands", async (req, res, next) => {
+  try {
+    const row = await transaction((client) =>
+      upsertAccessoryName(
+        client,
+        "accessory_brands",
+        "accessory-brand-",
+        req.body?.name,
+      ),
+    );
+    res.status(201).json(row);
+  } catch (e) {
+    next(e);
+  }
+});
+
+// Accessory stock batches
+app.get("/api/accessory-batches", async (req, res, next) => {
+  try {
+    const search = asText(req.query.q);
+    const result = search
+      ? await pool.query(
+          `SELECT * FROM accessory_batches
+           WHERE category_name ILIKE $1
+              OR brand_name ILIKE $1
+              OR product_name ILIKE $1
+              OR compatible_model ILIKE $1
+              OR variant_value ILIKE $1
+           ORDER BY received_at DESC`,
+          [`%${search}%`],
+        )
+      : await pool.query(
+          "SELECT * FROM accessory_batches ORDER BY received_at DESC",
+        );
+
+    res.json(result.rows.map(serializeAccessoryBatch));
+  } catch (e) {
+    next(e);
+  }
+});
+
+app.post("/api/accessory-batches", async (req, res, next) => {
+  try {
+    const input = req.body || {};
+    const categoryName = asText(input.category);
+    const brandName = asText(input.brand);
+    const productName = asText(input.productName || input.model);
+    const quantity = Number(input.receivedQuantity);
+    const unitCost = Number(input.unitCost);
+    const salePrice = Number(input.salePrice);
+
+    if (!categoryName || !brandName || !productName) {
+      throw httpError(400, "نوع الإكسسوار والماركة واسم المنتج مطلوبون.");
+    }
+
+    if (!Number.isInteger(quantity) || quantity < 1) {
+      throw httpError(400, "الكمية لازم تكون عددًا صحيحًا أكبر من صفر.");
+    }
+
+    if (
+      !Number.isFinite(unitCost) ||
+      unitCost < 0 ||
+      !Number.isFinite(salePrice) ||
+      salePrice < 0
+    ) {
+      throw httpError(400, "التكلفة وسعر البيع لازم يكونوا أرقامًا صحيحة.");
+    }
+
+    const id = await transaction(async (client) => {
+      const category = await upsertAccessoryName(
+        client,
+        "accessory_categories",
+        "accessory-category-",
+        categoryName,
+      );
+
+      const brand = await upsertAccessoryName(
+        client,
+        "accessory_brands",
+        "accessory-brand-",
+        brandName,
+      );
+
+      const batchId = asText(input.id) || newId("accessory-batch-");
+      const receivedAt = Number(input.receivedAt) || nowMs();
+
+      await client.query(
+        `INSERT INTO accessory_batches (
+          id, category_id, brand_id,
+          category_name, brand_name, product_name,
+          compatible_model, variant_type, variant_value,
+          received_quantity, available_quantity,
+          unit_cost, sale_price, supplier_name, received_at
+        )
+        VALUES (
+          $1, $2, $3,
+          $4, $5, $6,
+          $7, $8, $9,
+          $10, $10,
+          $11, $12, $13, $14
+        )`,
+        [
+          batchId,
+          category.id,
+          brand.id,
+          category.name,
+          brand.name,
+          productName,
+          asText(input.compatibleModel),
+          asText(input.variantType),
+          asText(input.variantValue),
+          quantity,
+          money(unitCost),
+          money(salePrice),
+          asText(input.supplierName),
+          receivedAt,
+        ],
+      );
+
+      return batchId;
+    });
+
+    const result = await pool.query(
+      "SELECT * FROM accessory_batches WHERE id = $1",
+      [id],
+    );
+
+    res.status(201).json(serializeAccessoryBatch(result.rows[0]));
   } catch (e) {
     next(e);
   }
