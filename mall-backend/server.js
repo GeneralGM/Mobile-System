@@ -1410,20 +1410,7 @@ async function createReturn(client, input) {
     appliedReduction = money(wantedReduction - toReduce);
     newRemaining = money(Math.max(0, remaining - appliedReduction));
   }
-  // رجّع الإكسسوار للمخزون فقط إذا كانت القطعة المرتجعة سليمة.
-  if (
-    condition === "sound" &&
-    item.item_type === "accessory" &&
-    item.accessory_batch_id
-  ) {
-    await client.query(
-      `UPDATE accessory_batches
-     SET available_quantity =
-       LEAST(received_quantity, available_quantity + $2)
-     WHERE id = $1`,
-      [item.accessory_batch_id, quantity],
-    );
-  }
+
   const customerRefund = money(Math.max(0, net - appliedReduction));
   const returnId = asText(input?.returnId) || newId("RET-");
   const returnNumber =
@@ -1449,6 +1436,20 @@ async function createReturn(client, input) {
     "طريقة التسوية",
   );
   const settlementStatus = customerRefund > 0 ? "pending" : "completed";
+  // رجّع الإكسسوار للمخزون فقط إذا كانت القطعة المرتجعة سليمة.
+  if (
+    condition === "sound" &&
+    item.item_type === "accessory" &&
+    item.accessory_batch_id
+  ) {
+    await client.query(
+      `UPDATE accessory_batches
+     SET available_quantity =
+       LEAST(received_quantity, available_quantity + $2)
+     WHERE id = $1`,
+      [item.accessory_batch_id, quantity],
+    );
+  }
   const modelLabel =
     `${item.brand} ${item.model}${item.storage ? ` (${item.storage}` : ""}${item.color ? `${item.storage ? ", " : " ("}${item.color}` : ""}${item.storage || item.color ? ")" : ""}`.trim();
   await client.query(
@@ -2950,6 +2951,543 @@ app.post("/api/import/localstorage", async (req, res, next) => {
     next(e);
   }
 });
+// ---- Electronic wallets / InstaPay transfers ----
+const TRANSFER_COMMISSION_DEFAULTS = Object.freeze({
+  wallet_withdrawal: 0,
+  wallet_transfer: 0,
+  instapay_withdrawal: 0,
+  instapay_transfer: 0,
+  instapay_vodafone_transfer: 0,
+});
+
+function transferLineDto(row) {
+  const dailyLimit = money(row.daily_limit);
+  const monthlyLimit = money(row.monthly_limit);
+  const dailyUsed = money(row.daily_used);
+  const monthlyUsed = money(row.monthly_used);
+  return {
+    id: row.id,
+    phone: row.phone,
+    ownerName: row.owner_name,
+    walletType: row.wallet_type || "",
+    bankName: row.bank_name || "",
+    lastFour: row.last_four || "",
+    supportsWallet: Boolean(row.supports_wallet),
+    supportsInstapay: Boolean(row.supports_instapay),
+    dailyLimit,
+    monthlyLimit,
+    dailyUsed,
+    monthlyUsed,
+    dailyRemaining: money(Math.max(0, dailyLimit - dailyUsed)),
+    monthlyRemaining: money(Math.max(0, monthlyLimit - monthlyUsed)),
+    balance: money(row.balance),
+    isActive: Boolean(row.is_active),
+    createdAt: asNumber(row.created_at),
+    updatedAt: asNumber(row.updated_at),
+  };
+}
+
+function transferTransactionDto(row) {
+  return {
+    id: row.id,
+    referenceNumber: row.reference_number,
+    operationType: row.operation_type,
+    serviceType: row.service_type,
+    commissionType: row.commission_type,
+    sourceLineId: row.source_line_id,
+    sourcePhone: row.source_phone_snapshot,
+    sourceOwnerName: row.source_owner_snapshot,
+    destinationLineId: row.destination_line_id || null,
+    destinationPhone: row.destination_phone_snapshot || "",
+    recipientPhone: row.recipient_phone || "",
+    recipientName: row.recipient_name || "",
+    amount: money(row.amount),
+    commission: money(row.commission),
+    transferCost: money(row.transfer_cost),
+    profit: money(row.profit),
+    transferToVodafone: Boolean(row.transfer_to_vodafone),
+    createdAt: asNumber(row.created_at),
+  };
+}
+
+async function resetTransferLinePeriods(queryable = pool) {
+  // PostgreSQL sessions are configured to Africa/Cairo; CURRENT_DATE therefore
+  // follows Egypt's local midnight without relying on a browser timer.
+  await queryable.query(
+    `UPDATE transfer_lines
+       SET daily_used = CASE WHEN daily_period < CURRENT_DATE THEN 0 ELSE daily_used END,
+           monthly_used = CASE
+             WHEN monthly_period < date_trunc('month', CURRENT_DATE)::date THEN 0
+             ELSE monthly_used
+           END,
+           daily_period = CASE WHEN daily_period < CURRENT_DATE THEN CURRENT_DATE ELSE daily_period END,
+           monthly_period = CASE
+             WHEN monthly_period < date_trunc('month', CURRENT_DATE)::date
+               THEN date_trunc('month', CURRENT_DATE)::date
+             ELSE monthly_period
+           END,
+           updated_at = (extract(epoch FROM clock_timestamp()) * 1000)::BIGINT
+     WHERE daily_period < CURRENT_DATE
+        OR monthly_period < date_trunc('month', CURRENT_DATE)::date`,
+  );
+}
+
+function validateTransferLineInput(body) {
+  const phone = asText(body?.phone);
+  const phoneDigits = phone.replace(/\D/g, "");
+  const ownerName = asText(body?.ownerName);
+  const supportsWallet = body?.supportsWallet === true;
+  const supportsInstapay = body?.supportsInstapay === true;
+  const walletType = asText(body?.walletType);
+  const bankName = asText(body?.bankName);
+  const lastFour = asText(body?.lastFour);
+  const dailyLimit = money(asNumber(body?.dailyLimit, NaN));
+  const monthlyLimit = money(asNumber(body?.monthlyLimit, NaN));
+  const balance = money(asNumber(body?.balance, NaN));
+
+  if (phoneDigits.length < 10 || phoneDigits.length > 15)
+    throw httpError(400, "رقم الخط لازم يكون من 10 إلى 15 رقمًا.");
+  if (!ownerName) throw httpError(400, "اكتب اسم صاحب الخط.");
+  if (!supportsWallet && !supportsInstapay)
+    throw httpError(400, "اختار المحفظة الإلكترونية أو إنستا باي على الأقل.");
+  if (supportsWallet && !walletType)
+    throw httpError(400, "اختار نوع المحفظة الإلكترونية.");
+  if (supportsInstapay && !bankName)
+    throw httpError(400, "اختار البنك الخاص بخط إنستا باي.");
+  if (lastFour && !/^\d{4}$/.test(lastFour))
+    throw httpError(400, "آخر أربع أرقام لازم تكون أرقامًا فقط.");
+  if (
+    ![dailyLimit, monthlyLimit, balance].every(
+      (n) => Number.isFinite(n) && n >= 0,
+    )
+  )
+    throw httpError(400, "الليميت والرصيد لازم يكونوا أرقامًا موجبة أو صفرًا.");
+
+  return {
+    phone,
+    phoneKey: phoneDigits,
+    ownerName,
+    walletType: supportsWallet ? walletType : "",
+    bankName: supportsInstapay ? bankName : "",
+    lastFour: supportsInstapay ? lastFour : "",
+    supportsWallet,
+    supportsInstapay,
+    dailyLimit,
+    monthlyLimit,
+    balance,
+  };
+}
+
+async function readTransferCommissions(queryable = pool) {
+  const result = await queryable.query(
+    "SELECT value FROM app_settings WHERE key = 'transfer_commissions' LIMIT 1",
+  );
+  const stored = result.rows[0]?.value;
+  const values = { ...TRANSFER_COMMISSION_DEFAULTS };
+  if (stored && typeof stored === "object" && !Array.isArray(stored)) {
+    for (const key of Object.keys(values)) {
+      const value = Number(stored[key]);
+      if (Number.isFinite(value) && value >= 0) values[key] = money(value);
+    }
+  }
+  return values;
+}
+
+app.get("/api/transfer-lines", async (_req, res, next) => {
+  try {
+    await resetTransferLinePeriods();
+    const result = await pool.query(
+      "SELECT * FROM transfer_lines ORDER BY is_active DESC, updated_at DESC, owner_name ASC",
+    );
+    res.json(result.rows.map(transferLineDto));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/transfer-lines", async (req, res, next) => {
+  try {
+    const line = validateTransferLineInput(req.body);
+    const now = nowMs();
+    const id = asText(req.body?.id) || newId("transfer-line-");
+    const result = await pool.query(
+      `INSERT INTO transfer_lines
+        (id,phone,phone_key,owner_name,wallet_type,bank_name,last_four,
+         supports_wallet,supports_instapay,daily_limit,monthly_limit,balance,
+         daily_used,monthly_used,daily_period,monthly_period,is_active,created_at,updated_at)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,0,0,CURRENT_DATE,
+         date_trunc('month',CURRENT_DATE)::date,TRUE,$13,$13)
+       RETURNING *`,
+      [
+        id,
+        line.phone,
+        line.phoneKey,
+        line.ownerName,
+        line.walletType,
+        line.bankName,
+        line.lastFour,
+        line.supportsWallet,
+        line.supportsInstapay,
+        line.dailyLimit,
+        line.monthlyLimit,
+        line.balance,
+        now,
+      ],
+    );
+    res.status(201).json(transferLineDto(result.rows[0]));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/transfer-lines/:id", async (req, res, next) => {
+  try {
+    const line = validateTransferLineInput(req.body);
+    const now = nowMs();
+    const result = await pool.query(
+      `UPDATE transfer_lines SET
+         phone=$2, phone_key=$3, owner_name=$4, wallet_type=$5, bank_name=$6,
+         last_four=$7, supports_wallet=$8, supports_instapay=$9, daily_limit=$10,
+         monthly_limit=$11, balance=$12, is_active=COALESCE($13,is_active), updated_at=$14
+       WHERE id=$1 RETURNING *`,
+      [
+        asText(req.params.id),
+        line.phone,
+        line.phoneKey,
+        line.ownerName,
+        line.walletType,
+        line.bankName,
+        line.lastFour,
+        line.supportsWallet,
+        line.supportsInstapay,
+        line.dailyLimit,
+        line.monthlyLimit,
+        line.balance,
+        typeof req.body?.isActive === "boolean" ? req.body.isActive : null,
+        now,
+      ],
+    );
+    if (!result.rowCount) throw httpError(404, "الخط غير موجود.");
+    res.json(transferLineDto(result.rows[0]));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.delete("/api/transfer-lines/:id", async (req, res, next) => {
+  try {
+    const result = await pool.query(
+      "UPDATE transfer_lines SET is_active=FALSE, updated_at=$2 WHERE id=$1 RETURNING *",
+      [asText(req.params.id), nowMs()],
+    );
+    if (!result.rowCount) throw httpError(404, "الخط غير موجود.");
+    res.json({ ok: true, line: transferLineDto(result.rows[0]) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/transfer-commissions", async (_req, res, next) => {
+  try {
+    res.json(await readTransferCommissions());
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/transfer-commissions", async (req, res, next) => {
+  try {
+    const input = req.body && typeof req.body === "object" ? req.body : {};
+    const values = {};
+    for (const key of Object.keys(TRANSFER_COMMISSION_DEFAULTS)) {
+      const value = Number(input[key]);
+      if (!Number.isFinite(value) || value < 0)
+        throw httpError(400, "كل عمولة لازم تكون رقمًا موجبًا أو صفرًا.");
+      values[key] = money(value);
+    }
+    const now = nowMs();
+    await pool.query(
+      `INSERT INTO app_settings(key,value,updated_at)
+       VALUES('transfer_commissions',$1::jsonb,$2)
+       ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at`,
+      [JSON.stringify(values), now],
+    );
+    res.json(values);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/transfers", async (req, res, next) => {
+  try {
+    const operationType = validEnum(
+      req.body?.operationType,
+      ["transfer", "withdrawal"],
+      "نوع العملية",
+    );
+    const serviceType = validEnum(
+      req.body?.serviceType,
+      ["wallet", "instapay"],
+      "الخدمة",
+    );
+    const sourceLineId = asText(req.body?.sourceLineId);
+    const destinationLineId = asText(req.body?.destinationLineId) || null;
+    const recipientPhoneRaw = asText(req.body?.recipientPhone);
+    const recipientPhone = recipientPhoneRaw.replace(/[^\d+]/g, "");
+    const recipientName = asText(req.body?.recipientName);
+    const amount = money(asNumber(req.body?.amount, NaN));
+    const transferCost = money(asNumber(req.body?.transferCost, NaN));
+    const transferToVodafone = req.body?.transferToVodafone === true;
+
+    if (!sourceLineId)
+      throw httpError(400, "اختار الخط اللي هتتنفذ عليه العملية.");
+    if (!Number.isFinite(amount) || amount <= 0)
+      throw httpError(400, "مبلغ العملية لازم يكون أكبر من صفر.");
+    if (!Number.isFinite(transferCost) || transferCost < 0)
+      throw httpError(400, "تكلفة التحويل لازم تكون صفرًا أو أكثر.");
+    if (operationType === "withdrawal" && destinationLineId)
+      throw httpError(400, "السحب لا يقبل اختيار خط داخلي كوجهة.");
+    if (destinationLineId && destinationLineId === sourceLineId)
+      throw httpError(400, "اختار خطًا مختلفًا لتحويل الرصيد لنفسك.");
+    if (
+      (operationType === "withdrawal" || !destinationLineId) &&
+      recipientPhone.replace(/\D/g, "").length < 10
+    )
+      throw httpError(400, "اكتب رقم العميل بشكل صحيح.");
+    if (
+      transferToVodafone &&
+      (operationType !== "transfer" ||
+        serviceType !== "instapay" ||
+        destinationLineId)
+    )
+      throw httpError(
+        400,
+        "خيار التحويل لفودافون متاح لتحويل إنستا باي إلى عميل فقط.",
+      );
+
+    const commissionType =
+      serviceType === "wallet"
+        ? operationType === "withdrawal"
+          ? "wallet_withdrawal"
+          : "wallet_transfer"
+        : operationType === "withdrawal"
+          ? "instapay_withdrawal"
+          : transferToVodafone
+            ? "instapay_vodafone_transfer"
+            : "instapay_transfer";
+
+    const operation = await transaction(async (client) => {
+      const lineIds = [
+        ...new Set([
+          sourceLineId,
+          ...(destinationLineId ? [destinationLineId] : []),
+        ]),
+      ].sort();
+      const locked = await client.query(
+        "SELECT * FROM transfer_lines WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE",
+        [lineIds],
+      );
+      if (locked.rowCount !== lineIds.length)
+        throw httpError(404, "الخط المختار غير موجود.");
+      await client.query(
+        `UPDATE transfer_lines
+         SET daily_used=CASE WHEN daily_period < CURRENT_DATE THEN 0 ELSE daily_used END,
+             monthly_used=CASE WHEN monthly_period < date_trunc('month',CURRENT_DATE)::date THEN 0 ELSE monthly_used END,
+             daily_period=CASE WHEN daily_period < CURRENT_DATE THEN CURRENT_DATE ELSE daily_period END,
+             monthly_period=CASE WHEN monthly_period < date_trunc('month',CURRENT_DATE)::date THEN date_trunc('month',CURRENT_DATE)::date ELSE monthly_period END,
+             updated_at=$2
+         WHERE id = ANY($1::text[])`,
+        [lineIds, nowMs()],
+      );
+      const reread = await client.query(
+        "SELECT * FROM transfer_lines WHERE id = ANY($1::text[]) ORDER BY id",
+        [lineIds],
+      );
+      const rowsById = new Map(reread.rows.map((row) => [row.id, row]));
+      const source = rowsById.get(sourceLineId);
+      const destination = destinationLineId
+        ? rowsById.get(destinationLineId)
+        : null;
+      if (!source?.is_active)
+        throw httpError(
+          409,
+          "الخط المختار موقوف. فعّله من إدارة الخطوط أولًا.",
+        );
+      if (serviceType === "wallet" && !source.supports_wallet)
+        throw httpError(400, "الخط المحدد لا يدعم المحافظ الإلكترونية.");
+      if (serviceType === "instapay" && !source.supports_instapay)
+        throw httpError(400, "الخط المحدد لا يدعم إنستا باي.");
+      if (destinationLineId) {
+        if (!destination?.is_active)
+          throw httpError(409, "خط الاستقبال الداخلي غير نشط.");
+        if (serviceType === "wallet" && !destination.supports_wallet)
+          throw httpError(
+            400,
+            "خط الاستقبال لا يدعم المحافظ الإلكترونية المختارة.",
+          );
+        if (serviceType === "instapay" && !destination.supports_instapay)
+          throw httpError(400, "خط الاستقبال لا يدعم إنستا باي المختار.");
+      }
+
+      const dailyRemaining = money(
+        Math.max(0, asNumber(source.daily_limit) - asNumber(source.daily_used)),
+      );
+      const monthlyRemaining = money(
+        Math.max(
+          0,
+          asNumber(source.monthly_limit) - asNumber(source.monthly_used),
+        ),
+      );
+      if (amount > dailyRemaining + 0.001)
+        throw httpError(
+          409,
+          `العملية مرفوضة: المتبقي من الليميت اليومي ${dailyRemaining.toFixed(2)} ج.م فقط.`,
+        );
+      if (amount > monthlyRemaining + 0.001)
+        throw httpError(
+          409,
+          `العملية مرفوضة: المتبقي من الليميت الشهري ${monthlyRemaining.toFixed(2)} ج.م فقط.`,
+        );
+      if (
+        operationType === "transfer" &&
+        asNumber(source.balance) + 0.001 < amount
+      )
+        throw httpError(
+          409,
+          `رصيد الخط غير كافٍ. الرصيد المتاح ${money(source.balance).toFixed(2)} ج.م.`,
+        );
+
+      const commissions = await readTransferCommissions(client);
+      const commission = money(commissions[commissionType]);
+      const profit = money(commission - transferCost);
+      const id = newId("transfer-");
+      const referenceNumber = `TR-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
+      const destinationPhone = destination ? destination.phone : recipientPhone;
+      const now = nowMs();
+
+      await client.query(
+        `UPDATE transfer_lines
+           SET balance = CASE WHEN $2='withdrawal' THEN balance + $3 ELSE balance - $3 END,
+               daily_used=daily_used+$3,
+               monthly_used=monthly_used+$3,
+               updated_at=$4
+         WHERE id=$1`,
+        [sourceLineId, operationType, amount, now],
+      );
+      if (destination) {
+        await client.query(
+          "UPDATE transfer_lines SET balance=balance+$2, updated_at=$3 WHERE id=$1",
+          [destination.id, amount, now],
+        );
+      }
+
+      const inserted = await client.query(
+        `INSERT INTO transfer_transactions
+          (id,reference_number,operation_type,service_type,commission_type,
+           source_line_id,source_phone_snapshot,source_owner_snapshot,
+           destination_line_id,destination_phone_snapshot,recipient_phone,recipient_name,
+           amount,commission,transfer_cost,profit,transfer_to_vodafone,created_at)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+         RETURNING *`,
+        [
+          id,
+          referenceNumber,
+          operationType,
+          serviceType,
+          commissionType,
+          source.id,
+          source.phone,
+          source.owner_name,
+          destination?.id || null,
+          destinationPhone,
+          recipientPhone,
+          recipientName,
+          amount,
+          commission,
+          transferCost,
+          profit,
+          transferToVodafone,
+          now,
+        ],
+      );
+      return transferTransactionDto(inserted.rows[0]);
+    });
+    res.status(201).json(operation);
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get("/api/transfers", async (req, res, next) => {
+  try {
+    const where = [];
+    const values = [];
+    const add = (sql, value) => {
+      values.push(value);
+      where.push(sql.replace("?", `$${values.length}`));
+    };
+    const q = asText(req.query.q);
+    const operationType = asText(req.query.operationType);
+    const serviceType = asText(req.query.serviceType);
+    const sourceLineId = asText(req.query.sourceLineId);
+    const dateFrom = asText(req.query.dateFrom);
+    const dateTo = asText(req.query.dateTo);
+    const profitMin =
+      req.query.profitMin === undefined || req.query.profitMin === ""
+        ? null
+        : Number(req.query.profitMin);
+    const profitMax =
+      req.query.profitMax === undefined || req.query.profitMax === ""
+        ? null
+        : Number(req.query.profitMax);
+
+    if (q) {
+      values.push(`%${q}%`);
+      const p = `$${values.length}`;
+      where.push(
+        `(t.reference_number ILIKE ${p} OR t.source_phone_snapshot ILIKE ${p} OR t.source_owner_snapshot ILIKE ${p} OR t.recipient_phone ILIKE ${p} OR t.recipient_name ILIKE ${p} OR t.destination_phone_snapshot ILIKE ${p})`,
+      );
+    }
+    if (["transfer", "withdrawal"].includes(operationType))
+      add("t.operation_type = ?", operationType);
+    if (["wallet", "instapay"].includes(serviceType))
+      add("t.service_type = ?", serviceType);
+    if (sourceLineId) add("t.source_line_id = ?", sourceLineId);
+    if (dateFrom && /^\d{4}-\d{2}-\d{2}$/.test(dateFrom))
+      add(
+        "t.created_at >= (extract(epoch FROM (?::date::timestamp AT TIME ZONE 'Africa/Cairo')) * 1000)::bigint",
+        dateFrom,
+      );
+    if (dateTo && /^\d{4}-\d{2}-\d{2}$/.test(dateTo))
+      add(
+        "t.created_at < (extract(epoch FROM (((?::date + 1)::timestamp) AT TIME ZONE 'Africa/Cairo')) * 1000)::bigint",
+        dateTo,
+      );
+    if (profitMin !== null && Number.isFinite(profitMin))
+      add("t.profit >= ?", money(profitMin));
+    if (profitMax !== null && Number.isFinite(profitMax))
+      add("t.profit <= ?", money(profitMax));
+    const limit = Math.max(
+      1,
+      Math.min(1000, Math.trunc(asNumber(req.query.limit, 500))),
+    );
+    values.push(limit);
+    const query = `SELECT t.* FROM transfer_transactions t ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY t.created_at DESC LIMIT $${values.length}`;
+    const result = await pool.query(query, values);
+    res.json(result.rows.map(transferTransactionDto));
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Also runs while the server is open. Every read/operation independently rolls over
+// stale periods, so a closed PC does not preserve yesterday's consumed limit.
+const transferRolloverTimer = setInterval(() => {
+  resetTransferLinePeriods().catch((error) =>
+    console.error("Transfer limit rollover failed:", error.message),
+  );
+}, 30_000);
+transferRolloverTimer.unref?.();
 
 app.use((req, res) =>
   res

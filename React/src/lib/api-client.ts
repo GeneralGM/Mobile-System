@@ -276,52 +276,45 @@ export type EmployeeInput = {
   pin?: string;
   managerId?: string | null;
 };
+
+// Employee session token stays in memory and is attached only to protected employee routes.
 let pendingEmployeeSessionToken: string | null = null;
 
 function takeEmployeeSessionToken(explicitToken?: string): string {
   if (explicitToken) return explicitToken;
-
-  const token = pendingEmployeeSessionToken;
-
-  if (!token) {
+  if (!pendingEmployeeSessionToken) {
     throw new ApiError(
       "التحقق من صلاحية الموظف مطلوب. أدخل الرقم السري مرة أخرى.",
       401,
     );
   }
-
-  // لا تحذف الرمز بمجرد قراءته.
-  return token;
+  return pendingEmployeeSessionToken;
 }
 
 export const api = {
+  // Employee sessions are short-lived, signed by the backend, and kept in page memory.
   authenticateEmployee: async (input: { name: string; pin: string }) => {
     const session = await request<EmployeeSession>(
       "/api/employees/authenticate",
       json("POST", input),
     );
-
     pendingEmployeeSessionToken = session.token;
     return session;
   },
-
   authenticateEmployeeByPin: async (pin: string) => {
     const session = await request<EmployeeSession>(
       "/api/employees/authenticate-pin",
       json("POST", { pin }),
     );
-
     pendingEmployeeSessionToken = session.token;
     return session;
   },
-
   clearEmployeeSessionAuthorization: () => {
     pendingEmployeeSessionToken = null;
   },
   setEmployeeSessionAuthorization: (token: string) => {
     pendingEmployeeSessionToken = token;
   },
-
   getEmployeeDirectory: () =>
     request<EmployeeRecord[]>("/api/employees/directory"),
   bootstrapEmployeeOwner: (
@@ -340,14 +333,12 @@ export const api = {
       json("POST", input),
       takeEmployeeSessionToken(sessionToken),
     ),
-
   updateEmployee: (id: string, input: EmployeeInput, sessionToken?: string) =>
     request<EmployeeRecord>(
       `/api/employees/${encodeURIComponent(id)}`,
       json("PUT", input),
       takeEmployeeSessionToken(sessionToken),
     ),
-
   deleteEmployee: (id: string, sessionToken?: string) =>
     request<{ ok: boolean; employee: EmployeeRecord }>(
       `/api/employees/${encodeURIComponent(id)}`,
@@ -463,20 +454,7 @@ export const api = {
       json("PUT", { value }),
     ),
 
-  importLocalStorage: (payload: LocalStorageSnapshot) =>
-    request<{ ok: boolean; importKey: string; alreadyImported: boolean }>(
-      "/api/import/localstorage",
-      json("POST", payload),
-    ),
-  stats: () =>
-    request<{
-      salesCount: number;
-      salesTotal: number;
-      outstanding: number;
-      unitsAvailable: number;
-      customersCount: number;
-    }>("/api/stats"),
-
+  // Accessory catalog and stock batches
   getAccessoryCategories: () =>
     request<Array<{ id: string; name: string }>>("/api/accessory-categories"),
   saveAccessoryCategory: (name: string) =>
@@ -500,6 +478,65 @@ export const api = {
       "/api/accessory-batches",
       json("POST", batch),
     ),
+
+  // Electronic wallets / InstaPay transfer-line management
+  getTransferLines: () => request<TransferLineRecord[]>("/api/transfer-lines"),
+  createTransferLine: (line: TransferLineInput) =>
+    request<TransferLineRecord>("/api/transfer-lines", json("POST", line)),
+  updateTransferLine: (
+    id: string,
+    line: TransferLineInput & { isActive?: boolean },
+  ) =>
+    request<TransferLineRecord>(
+      `/api/transfer-lines/${encodeURIComponent(id)}`,
+      json("PUT", line),
+    ),
+  deactivateTransferLine: (id: string) =>
+    request<{ ok: boolean; line: TransferLineRecord }>(
+      `/api/transfer-lines/${encodeURIComponent(id)}`,
+      json("DELETE"),
+    ),
+
+  // Per-operation transfer commissions
+  getTransferCommissions: () =>
+    request<TransferCommissionSettings>("/api/transfer-commissions"),
+  saveTransferCommissions: (settings: TransferCommissionSettings) =>
+    request<TransferCommissionSettings>(
+      "/api/transfer-commissions",
+      json("PUT", settings),
+    ),
+
+  // Atomic withdrawal/transfer operation; the backend enforces balance and limits.
+  createTransfer: (input: CreateTransferInput) =>
+    request<TransferTransactionRecord>("/api/transfers", json("POST", input)),
+
+  // Transfer history and optional query filters
+  getTransfers: (filters: TransferHistoryFilters = {}) => {
+    const params = new URLSearchParams();
+    for (const [key, value] of Object.entries(filters)) {
+      if (value !== undefined && value !== null && String(value).trim()) {
+        params.set(key, String(value));
+      }
+    }
+    const query = params.toString();
+    return request<TransferTransactionRecord[]>(
+      `/api/transfers${query ? `?${query}` : ""}`,
+    );
+  },
+
+  importLocalStorage: (payload: LocalStorageSnapshot) =>
+    request<{ ok: boolean; importKey: string; alreadyImported: boolean }>(
+      "/api/import/localstorage",
+      json("POST", payload),
+    ),
+  stats: () =>
+    request<{
+      salesCount: number;
+      salesTotal: number;
+      outstanding: number;
+      unitsAvailable: number;
+      customersCount: number;
+    }>("/api/stats"),
 };
 
 export type BrandRecord = {
@@ -668,4 +705,94 @@ export type LocalStorageSnapshot = {
   warehouse?: WarehouseBatchRecord[];
   sales?: SaleRecord[];
   returns?: ReturnRecord[];
+};
+
+export type TransferService = "wallet" | "instapay";
+export type TransferOperationType = "transfer" | "withdrawal";
+
+export type TransferLineRecord = {
+  id: string;
+  phone: string;
+  ownerName: string;
+  walletType: string;
+  bankName: string;
+  lastFour: string;
+  supportsWallet: boolean;
+  supportsInstapay: boolean;
+  dailyLimit: number;
+  monthlyLimit: number;
+  dailyUsed: number;
+  monthlyUsed: number;
+  dailyRemaining: number;
+  monthlyRemaining: number;
+  balance: number;
+  isActive: boolean;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type TransferLineInput = {
+  phone: string;
+  ownerName: string;
+  walletType: string;
+  bankName: string;
+  lastFour: string;
+  supportsWallet: boolean;
+  supportsInstapay: boolean;
+  dailyLimit: number;
+  monthlyLimit: number;
+  balance: number;
+};
+
+export type TransferCommissionSettings = {
+  wallet_withdrawal: number;
+  wallet_transfer: number;
+  instapay_withdrawal: number;
+  instapay_transfer: number;
+  instapay_vodafone_transfer: number;
+};
+
+export type CreateTransferInput = {
+  operationType: TransferOperationType;
+  serviceType: TransferService;
+  sourceLineId: string;
+  destinationLineId?: string;
+  recipientPhone?: string;
+  recipientName?: string;
+  amount: number;
+  transferCost: number;
+  transferToVodafone?: boolean;
+};
+
+export type TransferTransactionRecord = {
+  id: string;
+  referenceNumber: string;
+  operationType: TransferOperationType;
+  serviceType: TransferService;
+  commissionType: keyof TransferCommissionSettings;
+  sourceLineId: string;
+  sourcePhone: string;
+  sourceOwnerName: string;
+  destinationLineId: string | null;
+  destinationPhone: string;
+  recipientPhone: string;
+  recipientName: string;
+  amount: number;
+  commission: number;
+  transferCost: number;
+  profit: number;
+  transferToVodafone: boolean;
+  createdAt: number;
+};
+
+export type TransferHistoryFilters = {
+  q?: string;
+  operationType?: TransferOperationType | "";
+  serviceType?: TransferService | "";
+  sourceLineId?: string;
+  dateFrom?: string;
+  dateTo?: string;
+  profitMin?: number | "";
+  profitMax?: number | "";
+  limit?: number;
 };

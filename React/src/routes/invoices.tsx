@@ -7,7 +7,9 @@ import {
   ChevronDown,
   ChevronUp,
   FileText,
+  Package,
   Search,
+  Smartphone,
 } from "lucide-react";
 import type { Sale } from "../types/sales";
 import { api } from "../lib/api-client";
@@ -19,6 +21,25 @@ export const Route = createFileRoute("/invoices")({
 const INPUT_CLASS =
   "w-full rounded-xl border border-gray-400 bg-white px-3.5 py-3 text-sm font-medium text-gray-950 shadow-sm outline-none placeholder:text-gray-500 focus:border-emerald-700 focus:ring-4 focus:ring-emerald-700/15";
 
+type InvoiceItem = Sale["items"][number] & {
+  itemType?: "mobile" | "accessory";
+  accessoryBatchId?: string;
+  accessoryCategory?: string;
+  accessoryBrand?: string;
+  compatibleModel?: string;
+  variantType?: string;
+  variantValue?: string;
+  returnedQuantity?: number;
+};
+
+function getSaleItems(sale: Sale): InvoiceItem[] {
+  return Array.isArray(sale.items) ? (sale.items as InvoiceItem[]) : [];
+}
+
+function isAccessory(item: InvoiceItem) {
+  return item.itemType === "accessory" || Boolean(item.accessoryBatchId);
+}
+
 function money(value: number) {
   return new Intl.NumberFormat("en-US", {
     style: "currency",
@@ -29,7 +50,7 @@ function money(value: number) {
 
 function numberText(value: number) {
   return new Intl.NumberFormat("en-US", { maximumFractionDigits: 2 }).format(
-    value,
+    Number.isFinite(value) ? value : 0,
   );
 }
 
@@ -60,6 +81,7 @@ function InvoicesPage() {
         setSales([]);
         setReady(true);
       });
+
     return () => {
       cancelled = true;
     };
@@ -67,34 +89,55 @@ function InvoicesPage() {
 
   const filteredSales = useMemo(() => {
     const term = query.trim().toLocaleLowerCase();
-    if (!term)
-      return [...sales].sort(
-        (a, b) => Number(b.createdAt) - Number(a.createdAt),
+    const ordered = [...sales].sort(
+      (a, b) => Number(b.createdAt) - Number(a.createdAt),
+    );
+    if (!term) return ordered;
+
+    return ordered.filter((sale) => {
+      const itemSearchValues = getSaleItems(sale).flatMap((item) => [
+        item.brand,
+        item.series,
+        item.model,
+        item.color,
+        item.ram,
+        item.storage,
+        item.accessoryCategory,
+        item.accessoryBrand,
+        item.compatibleModel,
+        item.variantType,
+        item.variantValue,
+      ]);
+
+      return [
+        sale.invoiceNumber,
+        sale.customerName,
+        sale.customerPhone,
+        ...itemSearchValues,
+      ].some((value) =>
+        String(value ?? "")
+          .toLocaleLowerCase()
+          .includes(term),
       );
-    return sales
-      .filter((sale) => {
-        const items = Array.isArray(sale.items) ? sale.items : [];
-        return [
-          sale.invoiceNumber ?? "",
-          sale.customerName ?? "",
-          sale.customerPhone ?? "",
-          ...items.flatMap((item) => [item.brand ?? "", item.model ?? ""]),
-        ].some((value) => String(value).toLocaleLowerCase().includes(term));
-      })
-      .sort((a, b) => Number(b.createdAt) - Number(a.createdAt));
+    });
   }, [sales, query]);
 
   const totalOutstanding = sales.reduce(
     (sum, sale) => sum + Math.max(0, Number(sale.remainingAmount) || 0),
     0,
   );
+  const totalSales = sales.reduce(
+    (sum, sale) => sum + (Number(sale.total) || 0),
+    0,
+  );
 
-  if (!ready)
+  if (!ready) {
     return (
       <main dir="rtl" className="min-h-screen bg-gray-50 p-6 text-gray-900">
         جاري تحميل الفواتير...
       </main>
     );
+  }
 
   return (
     <main
@@ -112,7 +155,8 @@ function InvoicesPage() {
               الفواتير
             </h1>
             <p className="mt-2 text-sm text-gray-700">
-              كل الفواتير المسجلة في النظام، مع تفاصيل الأجهزة وأسعار البيع.
+              كل الفواتير المسجلة في النظام، مع تفاصيل الموبايلات والإكسسوارات
+              وأسعار البيع.
             </p>
           </div>
           <Link
@@ -135,9 +179,7 @@ function InvoicesPage() {
               إجمالي المبيعات
             </p>
             <p className="mt-3 text-2xl font-extrabold text-gray-950">
-              {money(
-                sales.reduce((sum, sale) => sum + (Number(sale.total) || 0), 0),
-              )}
+              {money(totalSales)}
             </p>
           </div>
           <div className="rounded-2xl border border-gray-300 bg-white p-5 shadow-sm">
@@ -166,7 +208,7 @@ function InvoicesPage() {
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="ابحث برقم الفاتورة أو العميل أو الموديل"
+                placeholder="ابحث برقم الفاتورة أو العميل أو اسم المنتج أو النوع أو الموديل المتوافق"
                 className={`${INPUT_CLASS} pr-10`}
               />
             </div>
@@ -189,7 +231,7 @@ function InvoicesPage() {
                   <tr>
                     <th className="px-5 py-4">رقم الفاتورة</th>
                     <th className="px-5 py-4">العميل</th>
-                    <th className="px-5 py-4">الأجهزة</th>
+                    <th className="px-5 py-4">المنتجات</th>
                     <th className="px-5 py-4">طريقة الدفع</th>
                     <th className="px-5 py-4">الإجمالي</th>
                     <th className="px-5 py-4">المدفوع</th>
@@ -200,8 +242,22 @@ function InvoicesPage() {
                 </thead>
                 <tbody className="divide-y divide-gray-200">
                   {filteredSales.map((sale) => {
-                    const items = Array.isArray(sale.items) ? sale.items : [];
+                    const items = getSaleItems(sale);
                     const isExpanded = expanded.has(sale.id);
+                    const pieceCount = items.reduce(
+                      (sum, item) =>
+                        sum + Math.max(0, Number(item.quantity) || 0),
+                      0,
+                    );
+                    const accessoryCount = items
+                      .filter(isAccessory)
+                      .reduce(
+                        (sum, item) =>
+                          sum + Math.max(0, Number(item.quantity) || 0),
+                        0,
+                      );
+                    const mobileCount = pieceCount - accessoryCount;
+
                     return (
                       <Fragment key={sale.id}>
                         <tr className="hover:bg-gray-50">
@@ -225,14 +281,11 @@ function InvoicesPage() {
                             )}
                           </td>
                           <td className="px-5 py-4 font-semibold text-gray-900">
-                            {numberText(
-                              items.reduce(
-                                (sum, item) =>
-                                  sum + Math.max(1, Number(item.quantity) || 1),
-                                0,
-                              ),
-                            )}{" "}
-                            قطعة
+                            {numberText(pieceCount)} قطعة
+                            <p className="mt-1 text-xs font-normal text-gray-600">
+                              موبايلات: {numberText(mobileCount)} · إكسسوارات:{" "}
+                              {numberText(accessoryCount)}
+                            </p>
                           </td>
                           <td className="px-5 py-4">
                             <span className="rounded-lg bg-gray-100 px-2.5 py-1.5 text-xs font-bold text-gray-900">
@@ -294,6 +347,7 @@ function InvoicesPage() {
                             </button>
                           </td>
                         </tr>
+
                         {isExpanded && (
                           <tr className="bg-gray-50">
                             <td colSpan={9} className="px-5 py-4">
@@ -303,54 +357,163 @@ function InvoicesPage() {
                                 </p>
                                 {items.length === 0 ? (
                                   <p className="text-sm text-gray-700">
-                                    لا توجد تفاصيل أجهزة محفوظة داخل هذه
+                                    لا توجد تفاصيل منتجات محفوظة داخل هذه
                                     الفاتورة القديمة.
                                   </p>
                                 ) : (
-                                  items.map((item) => (
-                                    <div
-                                      key={item.deviceId}
-                                      className="flex flex-col gap-2 rounded-xl border border-gray-200 bg-white p-3 sm:flex-row sm:items-center sm:justify-between"
-                                    >
-                                      <div>
-                                        <p className="font-semibold text-gray-950">
-                                          {item.brand} {item.series || "عام"}{" "}
-                                          {item.model}
-                                        </p>
+                                  items.map((item, index) => {
+                                    const accessory = isAccessory(item);
+                                    const quantity = Math.max(
+                                      0,
+                                      Number(item.quantity) || 0,
+                                    );
+                                    const returned = Math.max(
+                                      0,
+                                      Number(item.returnedQuantity) || 0,
+                                    );
+                                    const unitPrice =
+                                      Number(
+                                        item.finalPrice ??
+                                          (sale.paymentMethod === "installment"
+                                            ? item.installmentFinalPrice
+                                            : item.cashFinalPrice),
+                                      ) || 0;
+                                    const title = accessory
+                                      ? item.model || "إكسسوار"
+                                      : `${item.brand || ""} ${item.series || "عام"} ${item.model || ""}`.trim();
 
-                                        <div>
-                                          <p className="font-semibold text-gray-950">
-                                            {item.brand} {item.series || "عام"}{" "}
-                                            {item.model}
-                                          </p>
-                                          <p className="mt-1 text-xs text-gray-600">
-                                            الكمية:{" "}
-                                            {numberText(
-                                              Math.max(
-                                                1,
-                                                Number(item.quantity) || 1,
-                                              ),
-                                            )}{" "}
-                                            قطعة
-                                          </p>
+                                    return (
+                                      <div
+                                        key={`${item.deviceId || item.accessoryBatchId || "item"}-${index}`}
+                                        className="rounded-xl border border-gray-200 bg-white p-4"
+                                      >
+                                        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+                                          <div className="min-w-0">
+                                            <div className="flex flex-wrap items-center gap-2">
+                                              {accessory ? (
+                                                <Package
+                                                  size={17}
+                                                  className="text-emerald-800"
+                                                />
+                                              ) : (
+                                                <Smartphone
+                                                  size={17}
+                                                  className="text-slate-700"
+                                                />
+                                              )}
+                                              <p className="font-semibold text-gray-950">
+                                                {title}
+                                              </p>
+                                              <span
+                                                className={`rounded-md px-2 py-1 text-[11px] font-bold ${accessory ? "bg-emerald-100 text-emerald-900" : "bg-slate-100 text-slate-800"}`}
+                                              >
+                                                {accessory
+                                                  ? "إكسسوار"
+                                                  : "موبايل"}
+                                              </span>
+                                            </div>
+
+                                            {accessory ? (
+                                              <div className="mt-2 space-y-1 text-xs text-gray-600">
+                                                {(item.accessoryCategory ||
+                                                  item.accessoryBrand ||
+                                                  item.brand) && (
+                                                  <p>
+                                                    {item.accessoryCategory
+                                                      ? `الفئة: ${item.accessoryCategory}`
+                                                      : ""}
+                                                    {item.accessoryCategory &&
+                                                    (item.accessoryBrand ||
+                                                      item.brand)
+                                                      ? " · "
+                                                      : ""}
+                                                    {item.accessoryBrand ||
+                                                    item.brand
+                                                      ? `الماركة: ${item.accessoryBrand || item.brand}`
+                                                      : ""}
+                                                  </p>
+                                                )}
+                                                {item.compatibleModel && (
+                                                  <p>
+                                                    متوافق مع:{" "}
+                                                    {item.compatibleModel}
+                                                  </p>
+                                                )}
+                                                {(item.variantType ||
+                                                  item.variantValue) && (
+                                                  <p>
+                                                    المواصفة:{" "}
+                                                    {[
+                                                      item.variantType,
+                                                      item.variantValue,
+                                                    ]
+                                                      .filter(Boolean)
+                                                      .join(" — ")}
+                                                  </p>
+                                                )}
+                                                {item.color && (
+                                                  <p>اللون: {item.color}</p>
+                                                )}
+                                              </div>
+                                            ) : (
+                                              <p className="mt-2 text-xs text-gray-600">
+                                                {[
+                                                  item.storage,
+                                                  item.ram,
+                                                  item.color,
+                                                ]
+                                                  .filter(Boolean)
+                                                  .join(" · ")}
+                                              </p>
+                                            )}
+
+                                            <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-gray-600">
+                                              <span>
+                                                الكمية المباعة:{" "}
+                                                <strong>
+                                                  {numberText(quantity)}
+                                                </strong>
+                                              </span>
+                                              <span>
+                                                المرتجع:{" "}
+                                                <strong className="text-amber-700">
+                                                  {numberText(returned)}
+                                                </strong>
+                                              </span>
+                                              <span>
+                                                المتبقي بدون إرجاع:{" "}
+                                                <strong className="text-emerald-800">
+                                                  {numberText(
+                                                    Math.max(
+                                                      0,
+                                                      quantity - returned,
+                                                    ),
+                                                  )}
+                                                </strong>
+                                              </span>
+                                              <span>
+                                                سعر الوحدة:{" "}
+                                                <strong>
+                                                  {money(unitPrice)}
+                                                </strong>
+                                              </span>
+                                            </div>
+                                          </div>
+                                          <div className="shrink-0 text-left sm:text-right">
+                                            <p className="text-xs text-gray-600">
+                                              إجمالي البند
+                                            </p>
+                                            <p
+                                              className="mt-1 font-extrabold text-gray-950"
+                                              dir="ltr"
+                                            >
+                                              {money(unitPrice * quantity)}
+                                            </p>
+                                          </div>
                                         </div>
                                       </div>
-                                      <p
-                                        className="font-bold text-gray-950"
-                                        dir="ltr"
-                                      >
-                                        {money(
-                                          Number(
-                                            item.finalPrice ??
-                                              (sale.paymentMethod ===
-                                              "installment"
-                                                ? item.installmentFinalPrice
-                                                : item.cashFinalPrice),
-                                          ) || 0,
-                                        )}
-                                      </p>
-                                    </div>
-                                  ))
+                                    );
+                                  })
                                 )}
                                 {sale.notes && (
                                   <p className="text-sm text-gray-700">
@@ -368,8 +531,9 @@ function InvoicesPage() {
               </table>
             </div>
           )}
+
           <div className="border-t border-gray-200 bg-gray-50 px-5 py-3 text-xs text-gray-700">
-            الفواتير محفوظة محليًا في المتصفح الحالي.
+            الفواتير محفوظة في قاعدة البيانات المشتركة.
           </div>
         </section>
       </div>
