@@ -12,6 +12,7 @@ import { Route as rootRouteImport } from './routes/__root'
 import { Route as WarehouseRouteImport } from './routes/warehouse'
 import { Route as TransfersRouteImport } from './routes/transfers'
 import { Route as TransferHistoryRouteImport } from './routes/transfer-history'
+import { Route as ShiftsRouteImport } from './routes/shifts'
 import { Route as SalesRouteImport } from './routes/sales'
 import { Route as RolesRouteImport } from './routes/roles'
 import { Route as ReturnsHistoryRouteImport } from './routes/returns-history'
@@ -34,6 +35,11 @@ const TransfersRoute = TransfersRouteImport.update({
 const TransferHistoryRoute = TransferHistoryRouteImport.update({
   id: '/transfer-history',
   path: '/transfer-history',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ShiftsRoute = ShiftsRouteImport.update({
+  id: '/shifts',
+  path: '/shifts',
   getParentRoute: () => rootRouteImport,
 } as any)
 const SalesRoute = SalesRouteImport.update({
@@ -86,6 +92,7 @@ export interface FileRoutesByFullPath {
   '/returns-history': typeof ReturnsHistoryRoute
   '/roles': typeof RolesRoute
   '/sales': typeof SalesRoute
+  '/shifts': typeof ShiftsRoute
   '/transfer-history': typeof TransferHistoryRoute
   '/transfers': typeof TransfersRoute
   '/warehouse': typeof WarehouseRoute
@@ -99,6 +106,7 @@ export interface FileRoutesByTo {
   '/returns-history': typeof ReturnsHistoryRoute
   '/roles': typeof RolesRoute
   '/sales': typeof SalesRoute
+  '/shifts': typeof ShiftsRoute
   '/transfer-history': typeof TransferHistoryRoute
   '/transfers': typeof TransfersRoute
   '/warehouse': typeof WarehouseRoute
@@ -113,6 +121,7 @@ export interface FileRoutesById {
   '/returns-history': typeof ReturnsHistoryRoute
   '/roles': typeof RolesRoute
   '/sales': typeof SalesRoute
+  '/shifts': typeof ShiftsRoute
   '/transfer-history': typeof TransferHistoryRoute
   '/transfers': typeof TransfersRoute
   '/warehouse': typeof WarehouseRoute
@@ -128,6 +137,7 @@ export interface FileRouteTypes {
     | '/returns-history'
     | '/roles'
     | '/sales'
+    | '/shifts'
     | '/transfer-history'
     | '/transfers'
     | '/warehouse'
@@ -141,6 +151,7 @@ export interface FileRouteTypes {
     | '/returns-history'
     | '/roles'
     | '/sales'
+    | '/shifts'
     | '/transfer-history'
     | '/transfers'
     | '/warehouse'
@@ -154,6 +165,7 @@ export interface FileRouteTypes {
     | '/returns-history'
     | '/roles'
     | '/sales'
+    | '/shifts'
     | '/transfer-history'
     | '/transfers'
     | '/warehouse'
@@ -168,6 +180,7 @@ export interface RootRouteChildren {
   ReturnsHistoryRoute: typeof ReturnsHistoryRoute
   RolesRoute: typeof RolesRoute
   SalesRoute: typeof SalesRoute
+  ShiftsRoute: typeof ShiftsRoute
   TransferHistoryRoute: typeof TransferHistoryRoute
   TransfersRoute: typeof TransfersRoute
   WarehouseRoute: typeof WarehouseRoute
@@ -194,6 +207,13 @@ declare module '@tanstack/react-router' {
       path: '/transfer-history'
       fullPath: '/transfer-history'
       preLoaderRoute: typeof TransferHistoryRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/shifts': {
+      id: '/shifts'
+      path: '/shifts'
+      fullPath: '/shifts'
+      preLoaderRoute: typeof ShiftsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/sales': {
@@ -264,6 +284,7 @@ const rootRouteChildren: RootRouteChildren = {
   ReturnsHistoryRoute: ReturnsHistoryRoute,
   RolesRoute: RolesRoute,
   SalesRoute: SalesRoute,
+  ShiftsRoute: ShiftsRoute,
   TransferHistoryRoute: TransferHistoryRoute,
   TransfersRoute: TransfersRoute,
   WarehouseRoute: WarehouseRoute,

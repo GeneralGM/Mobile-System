@@ -40,7 +40,7 @@ type EmployeeDraft = {
   managerId?: string | null;
 };
 
-type GateSuccess = (employee: EmployeeRecord) => void;
+type GateSuccess = (employee: EmployeeRecord, sessionToken: string) => void;
 
 const ROLE_LABEL: Record<EmployeeRole, string> = {
   worker: "عامل / موظف",
@@ -101,6 +101,8 @@ function RolesPage() {
   const [currentOperator, setCurrentOperator] = useState<EmployeeRecord | null>(
     null,
   );
+  const [currentOperatorSessionToken, setCurrentOperatorSessionToken] =
+    useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
 
   async function refreshEmployees() {
@@ -143,11 +145,11 @@ function RolesPage() {
   function closeDialog() {
     setEditing(null);
     setCurrentOperator(null);
-    api.clearEmployeeSessionAuthorization();
+    setCurrentOperatorSessionToken(null);
   }
 
   async function handleSaveEmployee(data: EmployeeDraft) {
-    if (!editing || !currentOperator) {
+    if (!editing || !currentOperator || !currentOperatorSessionToken) {
       toast.error(
         "انتهت صلاحية التحقق. افتح الإجراء مرة أخرى وأدخل الرقم السري.",
       );
@@ -162,14 +164,14 @@ function RolesPage() {
     setIsSaving(true);
     try {
       if (editing === "new") {
-        await api.createEmployee(data);
+        await api.createEmployee(data, currentOperatorSessionToken);
         toast.success("تم إنشاء الموظف بنجاح.");
       } else {
         if (!canManageTarget(currentOperator, editing)) {
           toast.error("لا تسمح رتبتك بتعديل هذا الموظف.");
           return;
         }
-        await api.updateEmployee(editing.id, data);
+        await api.updateEmployee(editing.id, data, currentOperatorSessionToken);
         toast.success("تم تحديث بيانات الموظف بنجاح.");
       }
       closeDialog();
@@ -186,6 +188,7 @@ function RolesPage() {
   async function handleDeleteEmployee(
     employee: EmployeeRecord,
     operator: EmployeeRecord,
+    sessionToken: string,
   ) {
     if (!canManageTarget(operator, employee)) {
       toast.error("لا تسمح رتبتك بحذف هذا الموظف.");
@@ -193,7 +196,7 @@ function RolesPage() {
     }
 
     try {
-      await api.deleteEmployee(employee.id);
+      await api.deleteEmployee(employee.id, sessionToken);
       toast.success("تم حذف الموظف.");
       await refreshEmployees();
     } catch (error) {
@@ -201,9 +204,8 @@ function RolesPage() {
     }
   }
 
-  const onAddSuccess: GateSuccess = (operator) => {
+  const onAddSuccess: GateSuccess = (operator, sessionToken) => {
     if (!isEmployeeManager(operator.role)) {
-      api.clearEmployeeSessionAuthorization();
       toast.error("إضافة الموظفين متاحة للمالك والمدير والمطوّر.");
       return;
     }
@@ -213,18 +215,18 @@ function RolesPage() {
       operator.role !== "owner" &&
       operator.role !== "developer"
     ) {
-      api.clearEmployeeSessionAuthorization();
       toast.error("الإدارة العليا متاحة للمالك والمطوّر فقط.");
       return;
     }
 
     setCurrentOperator(operator);
+    setCurrentOperatorSessionToken(sessionToken);
     setEditing("new");
   };
 
   const onEditSuccess =
     (target: EmployeeRecord): GateSuccess =>
-    (operator) => {
+    (operator, sessionToken) => {
       if (!canManageTarget(operator, target)) {
         toast.error(
           operator.role === "manager"
@@ -234,13 +236,14 @@ function RolesPage() {
         return;
       }
       setCurrentOperator(operator);
+      setCurrentOperatorSessionToken(sessionToken);
       setEditing(target);
     };
 
   const onDeleteSuccess =
     (target: EmployeeRecord): GateSuccess =>
-    (operator) => {
-      void handleDeleteEmployee(target, operator);
+    (operator, sessionToken) => {
+      void handleDeleteEmployee(target, operator, sessionToken);
     };
 
   return (

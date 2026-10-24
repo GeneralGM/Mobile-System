@@ -118,18 +118,18 @@ function Dashboard() {
     ...stat,
     value: backendStats
       ? [
-          new Intl.NumberFormat("ar-EG", {
+          new Intl.NumberFormat("en-EG", {
             style: "currency",
             currency: "EGP",
             maximumFractionDigits: 0,
           }).format(backendStats.salesTotal),
-          new Intl.NumberFormat("ar-EG").format(backendStats.unitsAvailable),
-          new Intl.NumberFormat("ar-EG", {
+          new Intl.NumberFormat("en-EG").format(backendStats.unitsAvailable),
+          new Intl.NumberFormat("en-EG", {
             style: "currency",
             currency: "EGP",
             maximumFractionDigits: 0,
           }).format(backendStats.outstanding),
-          new Intl.NumberFormat("ar-EG").format(backendStats.customersCount),
+          new Intl.NumberFormat("en-EG").format(backendStats.customersCount),
         ][index]
       : "—",
   }));

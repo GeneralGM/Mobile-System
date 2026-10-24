@@ -17,7 +17,7 @@ type ActionGateProps = {
   children: React.ReactNode;
   requiredRole?: EmployeeRole;
   actionName?: string;
-  onSuccess: (employee: EmployeeRecord) => void;
+  onSuccess: (employee: EmployeeRecord, sessionToken: string) => void;
 };
 
 const ROLE_WEIGHT: Record<EmployeeRole, number> = {
@@ -68,8 +68,6 @@ export default function ActionGate({
       if (
         (ROLE_WEIGHT[employee.role] ?? 0) < (ROLE_WEIGHT[requiredRole] ?? 0)
       ) {
-        api.clearEmployeeSessionAuthorization();
-
         setError(
           `صلاحياتك لا تسمح بتنفيذ الإجراء. المطلوب: ${
             ROLE_LABEL[requiredRole]
@@ -78,13 +76,9 @@ export default function ActionGate({
         setPin("");
         return;
       }
-      api.setEmployeeSessionAuthorization(session.token);
-
       close();
-      onSuccess(employee);
+      onSuccess(employee, session.token);
     } catch (verifyError) {
-      api.clearEmployeeSessionAuthorization();
-
       setError(
         verifyError instanceof Error
           ? verifyError.message

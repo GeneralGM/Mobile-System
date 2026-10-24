@@ -104,8 +104,8 @@ const ROLE_WEIGHTS = {
 const EMPLOYEE_SESSION_TTL_SECONDS = Math.max(
   300,
   Math.min(
-    8 * 60 * 60,
-    Number(process.env.EMPLOYEE_SESSION_TTL_SECONDS) || 1800,
+    30 * 24 * 60 * 60,
+    Number(process.env.EMPLOYEE_SESSION_TTL_SECONDS) || 7 * 24 * 60 * 60,
   ),
 );
 const employeeLoginAttempts = new Map();
@@ -290,6 +290,8 @@ function clearEmployeeLoginFailures(keys) {
 }
 
 async function requireEmployeeSession(req, res, next) {
+  // A request-level gate may already have verified the same session.
+  if (req.employee) return next();
   try {
     employeeSessionSecret();
     const payload = readEmployeeSession(
@@ -311,6 +313,7 @@ async function requireEmployeeSession(req, res, next) {
         .json({ error: "حساب الموظف غير نشط أو غير موجود." });
     }
     req.employee = employeeSafeRecord(row);
+    req.employeeSessionExpiresAt = payload.exp * 1000;
     next();
   } catch (error) {
     next(error);
@@ -325,6 +328,26 @@ function requireEmployeeRoles(...roles) {
     next();
   };
 }
+
+// Global API access gate. Only health, the employee directory, PIN authentication,
+// and the protected first-owner bootstrap are public; all business data requires a valid employee session.
+const PUBLIC_EMPLOYEE_API_ROUTES = new Set([
+  "GET /health",
+  "GET /employees/directory",
+  "POST /employees/authenticate",
+  "POST /employees/authenticate-pin",
+  "POST /employees/bootstrap",
+]);
+app.use("/api", (req, res, next) => {
+  const pathname =
+    new URL(req.originalUrl, "http://localhost").pathname.replace(
+      /^\/api(?=\/|$)/,
+      "",
+    ) || "/";
+  const publicKey = `${req.method.toUpperCase()} ${pathname.replace(/\/$/, "") || "/"}`;
+  if (PUBLIC_EMPLOYEE_API_ROUTES.has(publicKey)) return next();
+  return requireEmployeeSession(req, res, next);
+});
 
 async function migrateLegacyEmployees() {
   const result = await pool.query(
@@ -968,7 +991,7 @@ async function fetchSales(
 async function createSale(
   client,
   input,
-  { importMode = false, updateStock = true } = {},
+  { importMode = false, updateStock = true, shiftId = null } = {},
 ) {
   const id = asText(input?.id) || newId("sale-");
   const invoiceNumber =
@@ -1087,8 +1110,8 @@ async function createSale(
     remainingAmount <= 0 ? "paid" : amountPaid > 0 ? "partial" : "unpaid";
 
   const inserted = await client.query(
-    `INSERT INTO sales(id,invoice_number,created_at,customer_id,customer_name,customer_phone,payment_method,total,amount_paid,remaining_amount,return_balance_reduced,original_installment_amount,installments_count,notes,status)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15) ON CONFLICT(id) DO NOTHING RETURNING id`,
+    `INSERT INTO sales(id,invoice_number,created_at,customer_id,customer_name,customer_phone,payment_method,total,amount_paid,remaining_amount,return_balance_reduced,original_installment_amount,installments_count,notes,status,shift_id)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16) ON CONFLICT(id) DO NOTHING RETURNING id`,
     [
       id,
       invoiceNumber,
@@ -1105,6 +1128,7 @@ async function createSale(
       installmentCount,
       asText(input?.notes),
       status,
+      shiftId,
     ],
   );
   if (!inserted.rowCount) return id;
@@ -1255,7 +1279,7 @@ variant_value)
   }
   if (amountPaid > 0) {
     await client.query(
-      `INSERT INTO payments(id,sale_id,installment_number,amount,record_type,created_at,note) VALUES($1,$2,NULL,$3,'initial_payment',$4,$5) ON CONFLICT(id) DO NOTHING`,
+      `INSERT INTO payments(id,sale_id,installment_number,amount,record_type,created_at,note,shift_id) VALUES($1,$2,NULL,$3,'initial_payment',$4,$5,$6) ON CONFLICT(id) DO NOTHING`,
       [
         newId("payment-"),
         id,
@@ -1264,6 +1288,7 @@ variant_value)
         importMode
           ? "ملخص التحصيلات المستوردة من التخزين المحلي"
           : "دفعة أولى / تحصيل عند إنشاء الفاتورة",
+        shiftId,
       ],
     );
   }
@@ -1312,7 +1337,7 @@ function getReturnPrice(item, method) {
       : [item.cash_final_price, item.final_price, item.cash_price];
   return prices.map((v) => asNumber(v)).find((v) => v > 0) || 0;
 }
-async function createReturn(client, input) {
+async function createReturn(client, input, { shiftId = null } = {}) {
   const saleId = asText(input?.invoiceId || input?.saleId);
   const itemIndex = Number(input?.itemIndex);
   const quantity = Number(input?.quantityReturned);
@@ -1453,8 +1478,8 @@ async function createReturn(client, input) {
   const modelLabel =
     `${item.brand} ${item.model}${item.storage ? ` (${item.storage}` : ""}${item.color ? `${item.storage ? ", " : " ("}${item.color}` : ""}${item.storage || item.color ? ")" : ""}`.trim();
   await client.query(
-    `INSERT INTO returns(return_id,return_number,created_at,sale_id,invoice_number,customer_name,customer_phone,item_index,sale_item_id,device_id,model,quantity_returned,unit_price,total_refund_amount,usage_fee,net_return_amount,balance_reduced,customer_refund_amount,settlement_status,reason,device_condition,settlement_method,status)
-     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,'completed')`,
+    `INSERT INTO returns(return_id,return_number,created_at,sale_id,invoice_number,customer_name,customer_phone,item_index,sale_item_id,device_id,model,quantity_returned,unit_price,total_refund_amount,usage_fee,net_return_amount,balance_reduced,customer_refund_amount,settlement_status,reason,device_condition,settlement_method,status,shift_id)
+     VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,'completed',$23)`,
     [
       returnId,
       returnNumber,
@@ -1478,6 +1503,7 @@ async function createReturn(client, input) {
       reason,
       condition,
       settlementMethod,
+      shiftId,
     ],
   );
   const status =
@@ -1535,6 +1561,282 @@ async function fetchReturns(client = pool) {
   return await Promise.all(rows.rows.map((row) => serializeReturn(row)));
 }
 
+// ---- Employee shifts and shift-level accounting ----
+function serializeShift(row) {
+  if (!row) return null;
+  return {
+    id: row.id,
+    employeeId: row.employee_id,
+    employeeName: row.employee_name || "",
+    employeeRole: row.employee_role || "worker",
+    status: row.status,
+    openedAt: Number(row.opened_at),
+    openingCash: money(row.opening_cash),
+    closedAt: row.closed_at == null ? null : Number(row.closed_at),
+    closingCash: row.closing_cash == null ? null : money(row.closing_cash),
+    expectedCash: row.expected_cash == null ? null : money(row.expected_cash),
+    cashDifference:
+      row.cash_difference == null ? null : money(row.cash_difference),
+    openNote: row.open_note || "",
+    closeNote: row.close_note || "",
+  };
+}
+
+async function getShiftById(client, shiftId, { lock = false } = {}) {
+  const result = await client.query(
+    `SELECT sh.*, e.name AS employee_name, e.role AS employee_role
+       FROM employee_shifts sh
+       JOIN employees e ON e.id = sh.employee_id
+      WHERE sh.id = $1${lock ? " FOR UPDATE OF sh" : ""}`,
+    [shiftId],
+  );
+  return result.rows[0] || null;
+}
+
+async function getOpenShiftForEmployee(
+  client,
+  employeeId,
+  { lock = false } = {},
+) {
+  const result = await client.query(
+    `SELECT sh.*, e.name AS employee_name, e.role AS employee_role
+       FROM employee_shifts sh
+       JOIN employees e ON e.id = sh.employee_id
+      WHERE sh.employee_id = $1 AND sh.status = 'open'
+      ORDER BY sh.opened_at DESC
+      LIMIT 1${lock ? " FOR UPDATE OF sh" : ""}`,
+    [employeeId],
+  );
+  const row = result.rows[0];
+  if (!row)
+    throw httpError(
+      409,
+      "لا يوجد شيفت مفتوح لحسابك. افتح الشيفت قبل تسجيل أي عملية.",
+    );
+  return row;
+}
+
+function canSeeAllShifts(employee) {
+  return Boolean(
+    employee &&
+    ["accountant", "manager", "owner", "developer"].includes(employee.role),
+  );
+}
+
+async function buildShiftReport(client, shift) {
+  const [
+    salesRes,
+    paymentsRes,
+    returnsRes,
+    settledReturnsRes,
+    settlementDetailsRes,
+    transfersRes,
+    transferReconciliation,
+  ] = await Promise.all([
+    client.query(
+      `SELECT s.id, s.invoice_number, s.created_at, s.customer_name, s.customer_phone,
+              s.payment_method, s.total, s.amount_paid, s.remaining_amount,
+              COALESCE(SUM((si.final_price - si.unit_cost) * si.quantity), 0) AS gross_profit,
+              COALESCE(SUM(si.quantity), 0) AS item_quantity
+         FROM sales s
+         LEFT JOIN sale_items si ON si.sale_id = s.id
+        WHERE s.shift_id = $1
+        GROUP BY s.id
+        ORDER BY s.created_at DESC`,
+      [shift.id],
+    ),
+    client.query(
+      `SELECT p.id, p.sale_id, p.amount, p.record_type, p.created_at, p.note,
+              s.invoice_number, s.customer_name
+         FROM payments p
+         LEFT JOIN sales s ON s.id = p.sale_id
+        WHERE p.shift_id = $1
+        ORDER BY p.created_at DESC`,
+      [shift.id],
+    ),
+    client.query(
+      `SELECT r.return_id, r.return_number, r.created_at, r.invoice_number,
+              r.customer_name, r.model, r.quantity_returned, r.total_refund_amount,
+              r.usage_fee, r.net_return_amount, r.customer_refund_amount,
+              r.settlement_status, r.settlement_method,
+              COALESCE(((r.unit_price - si.unit_cost) * r.quantity_returned) - r.usage_fee, 0) AS profit_reversal
+         FROM returns r
+         LEFT JOIN sale_items si ON si.id = r.sale_item_id
+        WHERE r.shift_id = $1
+        ORDER BY r.created_at DESC`,
+      [shift.id],
+    ),
+    client.query(
+      `SELECT COALESCE(SUM(customer_refund_amount), 0) AS cash_refunds
+         FROM returns
+        WHERE settlement_shift_id = $1
+          AND settlement_status = 'completed'
+          AND settlement_method = 'cash_refund'`,
+      [shift.id],
+    ),
+    client.query(
+      `SELECT return_id, return_number, invoice_number, customer_name,
+              customer_refund_amount, settlement_method, settlement_status
+         FROM returns
+        WHERE settlement_shift_id = $1 AND settlement_status = 'completed'
+        ORDER BY created_at DESC`,
+      [shift.id],
+    ),
+    client.query(
+      `SELECT id, reference_number, operation_type, service_type,
+              source_line_id, destination_line_id, source_phone_snapshot, destination_phone_snapshot, recipient_phone,
+              recipient_name, amount, commission, transfer_cost, profit,
+              transfer_to_vodafone, created_at
+         FROM transfer_transactions
+        WHERE shift_id = $1
+        ORDER BY created_at DESC`,
+      [shift.id],
+    ),
+    getShiftTransferReconciliation(client, shift),
+  ]);
+
+  const sum = (rows, property) =>
+    money(rows.reduce((total, row) => total + Number(row[property] || 0), 0));
+  const salesTotal = sum(salesRes.rows, "total");
+  const salesProfit = sum(salesRes.rows, "gross_profit");
+  const collections = sum(paymentsRes.rows, "amount");
+  const returnsTotal = sum(returnsRes.rows, "net_return_amount");
+  const returnsProfitReversal = sum(returnsRes.rows, "profit_reversal");
+  const cashRefunds = money(settledReturnsRes.rows[0]?.cash_refunds || 0);
+  const transferAmount = sum(transfersRes.rows, "amount");
+  const transferCommission = sum(transfersRes.rows, "commission");
+  const transferCost = sum(transfersRes.rows, "transfer_cost");
+  const transferProfit = sum(transfersRes.rows, "profit");
+
+  // Customer-facing transfers bring cash into the drawer; withdrawals / cash-outs
+  // send cash out. Internal line-to-line transfers do not move physical cash.
+  let calculatedTransferCashIncoming = 0;
+  let calculatedTransferCashOutgoing = 0;
+  for (const row of transfersRes.rows) {
+    if (row.destination_line_id) continue;
+    const amount = money(row.amount);
+    const commission = money(row.commission);
+    if (row.operation_type === "transfer") {
+      // The customer hands the shop the transfer amount plus the service commission.
+      calculatedTransferCashIncoming = money(calculatedTransferCashIncoming + amount + commission);
+    } else {
+      // For a cash withdrawal, the shop pays out the amount net of the commission retained.
+      calculatedTransferCashOutgoing = money(calculatedTransferCashOutgoing + Math.max(0, amount - commission));
+    }
+  }
+  // Older closed shifts keep their originally saved drawer expectation. Only shifts
+  // closed with the new snapshot version include transfer cash-flow details.
+  const hasVersionedTransferCashFlow = Boolean(transferReconciliation?.cashFlowVersion === 1);
+  const transferCashIncoming = shift.status === "closed" && !hasVersionedTransferCashFlow
+    ? 0 : calculatedTransferCashIncoming;
+  const transferCashOutgoing = shift.status === "closed" && !hasVersionedTransferCashFlow
+    ? 0 : calculatedTransferCashOutgoing;
+  const calculatedExpectedCash = money(
+    Number(shift.opening_cash || 0) + collections - cashRefunds + transferCashIncoming - transferCashOutgoing,
+  );
+  const expectedCash = shift.status === "closed" && shift.expected_cash != null
+    ? money(shift.expected_cash)
+    : calculatedExpectedCash;
+  if (transferReconciliation && shift.status === "open") {
+    transferReconciliation.cashFlowVersion = 1;
+    transferReconciliation.transferCashIncoming = transferCashIncoming;
+    transferReconciliation.transferCashOutgoing = transferCashOutgoing;
+  }
+
+  return {
+    shift: serializeShift(shift),
+    transferReconciliation,
+    summary: {
+      salesCount: salesRes.rowCount,
+      salesTotal,
+      salesProfit,
+      collections,
+      returnsCount: returnsRes.rowCount,
+      returnsTotal,
+      returnsProfitReversal,
+      cashRefunds,
+      transferCount: transfersRes.rowCount,
+      transferAmount,
+      transferCommission,
+      transferCost,
+      transferProfit,
+      transferCashIncoming,
+      transferCashOutgoing,
+      netProfit: money(salesProfit + transferProfit - returnsProfitReversal),
+      openingCash: money(shift.opening_cash),
+      expectedCash,
+      closingCash:
+        shift.closing_cash == null ? null : money(shift.closing_cash),
+      cashDifference:
+        shift.cash_difference == null ? null : money(shift.cash_difference),
+      collectedAndRefundedNet: money(collections - cashRefunds),
+    },
+    sales: salesRes.rows.map((r) => ({
+      id: r.id,
+      invoiceNumber: r.invoice_number,
+      createdAt: Number(r.created_at),
+      customerName: r.customer_name,
+      customerPhone: r.customer_phone,
+      paymentMethod: r.payment_method,
+      total: money(r.total),
+      amountPaidAtSale: money(r.amount_paid),
+      remainingAmount: money(r.remaining_amount),
+      profit: money(r.gross_profit),
+      itemQuantity: Number(r.item_quantity || 0),
+    })),
+    payments: paymentsRes.rows.map((r) => ({
+      id: r.id,
+      saleId: r.sale_id,
+      invoiceNumber: r.invoice_number || "",
+      customerName: r.customer_name || "",
+      amount: money(r.amount),
+      recordType: r.record_type,
+      createdAt: Number(r.created_at),
+      note: r.note || "",
+    })),
+    returns: returnsRes.rows.map((r) => ({
+      returnId: r.return_id,
+      returnNumber: r.return_number || "",
+      createdAt: r.created_at,
+      invoiceNumber: r.invoice_number || "",
+      customerName: r.customer_name || "",
+      model: r.model || "",
+      quantity: Number(r.quantity_returned || 0),
+      total: money(r.total_refund_amount),
+      usageFee: money(r.usage_fee),
+      netRefund: money(r.net_return_amount),
+      customerRefund: money(r.customer_refund_amount),
+      settlementStatus: r.settlement_status,
+      settlementMethod: r.settlement_method,
+      profitReversal: money(r.profit_reversal),
+    })),
+    settlements: settlementDetailsRes.rows.map((r) => ({
+      returnId: r.return_id,
+      returnNumber: r.return_number || "",
+      invoiceNumber: r.invoice_number || "",
+      customerName: r.customer_name || "",
+      customerRefund: money(r.customer_refund_amount),
+      settlementMethod: r.settlement_method,
+      settlementStatus: r.settlement_status,
+    })),
+    transfers: transfersRes.rows.map((r) => ({
+      id: r.id,
+      referenceNumber: r.reference_number,
+      operationType: r.operation_type,
+      serviceType: r.service_type,
+      sourcePhone: r.source_phone_snapshot,
+      destinationPhone: r.destination_phone_snapshot || r.recipient_phone || "",
+      recipientName: r.recipient_name || "",
+      amount: money(r.amount),
+      commission: money(r.commission),
+      transferCost: money(r.transfer_cost),
+      profit: money(r.profit),
+      transferToVodafone: Boolean(r.transfer_to_vodafone),
+      createdAt: Number(r.created_at),
+    })),
+  };
+}
+
 // Liveness and DB readiness.
 app.get("/api/health", async (_req, res, next) => {
   try {
@@ -1558,19 +1860,27 @@ app.get("/api/health", async (_req, res, next) => {
 app.post("/api/employees/authenticate", async (req, res, next) => {
   try {
     employeeSessionSecret();
+    const employeeId = asText(req.body?.employeeId);
     const name = asText(req.body?.name);
     const pin = String(req.body?.pin ?? "");
-    const keys = employeeAttemptKeys(req, name);
+    const keys = employeeAttemptKeys(req, employeeId || name);
     if (loginIsLimited(keys)) {
       return res.status(429).json({
         error: "محاولات تسجيل الدخول كثيرة. حاول مرة أخرى بعد 15 دقيقة.",
       });
     }
-    const result = await pool.query(
-      `SELECT id,name,role,manager_id,is_active,created_at,updated_at,pin_salt,pin_hash
-       FROM employees WHERE name_key=$1 LIMIT 2`,
-      [keyText(name)],
-    );
+    // Prefer the selected employee ID so duplicate display names remain safe and unambiguous.
+    const result = employeeId
+      ? await pool.query(
+          `SELECT id,name,role,manager_id,is_active,created_at,updated_at,pin_salt,pin_hash
+           FROM employees WHERE id=$1 LIMIT 1`,
+          [employeeId],
+        )
+      : await pool.query(
+          `SELECT id,name,role,manager_id,is_active,created_at,updated_at,pin_salt,pin_hash
+           FROM employees WHERE name_key=$1 LIMIT 2`,
+          [keyText(name)],
+        );
     const row = result.rows.length === 1 ? result.rows[0] : null;
     const valid = Boolean(
       row &&
@@ -1634,6 +1944,19 @@ app.post("/api/employees/authenticate-pin", async (req, res, next) => {
   } catch (error) {
     next(error);
   }
+});
+
+app.get("/api/employees/session", (req, res) => {
+  // This route is protected by the global /api employee-session middleware above.
+  if (!req.employee) {
+    return res.status(401).json({
+      error: "جلسة الموظف غير صالحة أو انتهت. سجّل الدخول مرة أخرى.",
+    });
+  }
+  return res.json({
+    employee: req.employee,
+    expiresAt: req.employeeSessionExpiresAt,
+  });
 });
 
 app.get("/api/employees/directory", async (_req, res, next) => {
@@ -2392,6 +2715,186 @@ app.put("/api/settings/:key", async (req, res, next) => {
   }
 });
 
+// Shift endpoints. Employee identity always comes from the signed server session.
+app.get(
+  "/api/shifts/current",
+  requireEmployeeSession,
+  async (req, res, next) => {
+    try {
+      const result = await pool.query(
+        `SELECT sh.*, e.name AS employee_name, e.role AS employee_role
+         FROM employee_shifts sh JOIN employees e ON e.id = sh.employee_id
+        WHERE sh.employee_id = $1 AND sh.status = 'open'
+        ORDER BY sh.opened_at DESC LIMIT 1`,
+        [req.employee.id],
+      );
+      res.json({ shift: serializeShift(result.rows[0] || null) });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.post("/api/shifts/open", requireEmployeeSession, async (req, res, next) => {
+  try {
+    const openingCashRaw = Number(req.body?.openingCash);
+    if (!Number.isFinite(openingCashRaw) || openingCashRaw < 0)
+      throw httpError(
+        400,
+        "عهدة بداية الشيفت لازم تكون رقمًا صحيحًا غير سالب.",
+      );
+    const openingCash = money(openingCashRaw);
+    const note = asText(req.body?.note);
+    const shift = await transaction(async (client) => {
+      const existing = await client.query(
+        "SELECT id FROM employee_shifts WHERE employee_id=$1 AND status='open' FOR UPDATE",
+        [req.employee.id],
+      );
+      if (existing.rowCount)
+        throw httpError(
+          409,
+          "عندك شيفت مفتوح بالفعل. اعرض الشيفت الحالي أو اقفله أولًا.",
+        );
+      const id = newId("shift-");
+      await client.query(
+        `INSERT INTO employee_shifts(id,employee_id,status,opened_at,opening_cash,open_note)
+         VALUES($1,$2,'open',$3,$4,$5)`,
+        [id, req.employee.id, nowMs(), openingCash, note],
+      );
+      const openedShift = await getShiftById(client, id);
+      // Capture each wallet / InstaPay service's real balance as the opening balance
+      // for this shift, so this shift starts with zero movements.
+      await captureShiftTransferOpeningSnapshot(client, openedShift, false);
+      return openedShift;
+    });
+    res.status(201).json({ shift: serializeShift(shift) });
+  } catch (error) {
+    if (error?.code === "23505")
+      return next(httpError(409, "يوجد شيفت مفتوح بالفعل لهذا الموظف."));
+    next(error);
+  }
+});
+
+app.get("/api/shifts", requireEmployeeSession, async (req, res, next) => {
+  try {
+    const values = [];
+    const clauses = [];
+    if (!canSeeAllShifts(req.employee)) {
+      values.push(req.employee.id);
+      clauses.push(`sh.employee_id = $${values.length}`);
+    } else if (asText(req.query.employeeId)) {
+      values.push(asText(req.query.employeeId));
+      clauses.push(`sh.employee_id = $${values.length}`);
+    }
+    const from = asText(req.query.dateFrom);
+    const to = asText(req.query.dateTo);
+    if (from && /^\d{4}-\d{2}-\d{2}$/.test(from)) {
+      values.push(from);
+      clauses.push(
+        `sh.opened_at >= (extract(epoch FROM ($${values.length}::date::timestamp AT TIME ZONE 'Africa/Cairo')) * 1000)::bigint`,
+      );
+    }
+    if (to && /^\d{4}-\d{2}-\d{2}$/.test(to)) {
+      values.push(to);
+      clauses.push(
+        `sh.opened_at < (extract(epoch FROM ((($${values.length}::date + 1)::timestamp) AT TIME ZONE 'Africa/Cairo')) * 1000)::bigint`,
+      );
+    }
+    values.push(
+      Math.max(1, Math.min(500, Math.trunc(asNumber(req.query.limit, 100)))),
+    );
+    const result = await pool.query(
+      `SELECT sh.*,e.name AS employee_name,e.role AS employee_role
+         FROM employee_shifts sh JOIN employees e ON e.id=sh.employee_id
+        ${clauses.length ? `WHERE ${clauses.join(" AND ")}` : ""}
+        ORDER BY sh.opened_at DESC LIMIT $${values.length}`,
+      values,
+    );
+    res.json(result.rows.map(serializeShift));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.get(
+  "/api/shifts/:id/report",
+  requireEmployeeSession,
+  async (req, res, next) => {
+    try {
+      const shift = await getShiftById(pool, asText(req.params.id));
+      if (!shift) throw httpError(404, "الشيفت غير موجود.");
+      if (
+        shift.employee_id !== req.employee.id &&
+        !canSeeAllShifts(req.employee)
+      )
+        throw httpError(403, "ليس لديك صلاحية لعرض تقرير شيفت موظف آخر.");
+      res.json(await buildShiftReport(pool, shift));
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+app.post(
+  "/api/shifts/:id/close",
+  requireEmployeeSession,
+  async (req, res, next) => {
+    try {
+      const closingCashRaw = Number(req.body?.closingCash);
+      if (!Number.isFinite(closingCashRaw) || closingCashRaw < 0)
+        throw httpError(
+          400,
+          "النقدية الفعلية عند الإغلاق لازم تكون رقمًا صحيحًا غير سالب.",
+        );
+      const closingCash = money(closingCashRaw);
+      const note = asText(req.body?.note);
+      const closed = await transaction(async (client) => {
+        const shift = await getShiftById(client, asText(req.params.id), {
+          lock: true,
+        });
+        if (!shift) throw httpError(404, "الشيفت غير موجود.");
+        if (shift.employee_id !== req.employee.id)
+          throw httpError(403, "الموظف يقدر يقفل الشيفت الخاص به فقط.");
+        if (shift.status !== "open")
+          throw httpError(409, "الشيفت مقفول بالفعل.");
+        const report = await buildShiftReport(client, shift);
+        const expectedCash = money(report.summary.expectedCash);
+        const now = nowMs();
+        if (report.transferReconciliation) {
+          await client.query(
+            `INSERT INTO employee_shift_transfer_reconciliation_snapshots(shift_id,snapshot,captured_at)
+             VALUES($1,$2::jsonb,$3)
+             ON CONFLICT (shift_id) DO UPDATE SET snapshot=EXCLUDED.snapshot,captured_at=EXCLUDED.captured_at`,
+            [shift.id, JSON.stringify({ ...report.transferReconciliation, kind: "final", closedAt: now }), now],
+          );
+        }
+        await client.query(
+          `UPDATE employee_shifts
+            SET status='closed',closed_at=$2,closing_cash=$3,expected_cash=$4,
+                cash_difference=$5,close_note=$6
+          WHERE id=$1`,
+          [
+            shift.id,
+            now,
+            closingCash,
+            expectedCash,
+            money(closingCash - expectedCash),
+            note,
+          ],
+        );
+        const finalShift = await getShiftById(client, shift.id);
+        return {
+          ...(await buildShiftReport(client, finalShift)),
+          shift: serializeShift(finalShift),
+        };
+      });
+      res.json(closed);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
 // Sales and invoice read routes.
 app.get("/api/sales", async (req, res, next) => {
   try {
@@ -2411,9 +2914,14 @@ app.get("/api/sales/:id", async (req, res, next) => {
     next(e);
   }
 });
-app.post("/api/sales", async (req, res, next) => {
+app.post("/api/sales", requireEmployeeSession, async (req, res, next) => {
   try {
-    const id = await transaction((client) => createSale(client, req.body));
+    const id = await transaction(async (client) => {
+      const shift = await getOpenShiftForEmployee(client, req.employee.id, {
+        lock: true,
+      });
+      return createSale(client, req.body, { shiftId: shift.id });
+    });
     const sale = await fetchSales({ id });
     res.status(201).json(sale);
   } catch (e) {
@@ -2452,9 +2960,12 @@ app.get("/api/payments", async (req, res, next) => {
     next(e);
   }
 });
-app.post("/api/payments", async (req, res, next) => {
+app.post("/api/payments", requireEmployeeSession, async (req, res, next) => {
   try {
     const result = await transaction(async (client) => {
+      const shift = await getOpenShiftForEmployee(client, req.employee.id, {
+        lock: true,
+      });
       const saleId = asText(req.body?.saleId || req.body?.invoiceId);
       const amount = money(Number(req.body?.amount));
       const installmentNumber =
@@ -2533,7 +3044,7 @@ app.post("/api/payments", async (req, res, next) => {
         installmentNumber == null ? "debt_payment" : "installment_payment";
       const paymentId = newId("payment-");
       await client.query(
-        "INSERT INTO payments(id,sale_id,installment_number,amount,record_type,created_at,note) VALUES($1,$2,$3,$4,$5,$6,$7)",
+        "INSERT INTO payments(id,sale_id,installment_number,amount,record_type,created_at,note,shift_id) VALUES($1,$2,$3,$4,$5,$6,$7,$8)",
         [
           paymentId,
           saleId,
@@ -2542,6 +3053,7 @@ app.post("/api/payments", async (req, res, next) => {
           recordType,
           nowMs(),
           note,
+          shift.id,
         ],
       );
       return { paymentId, saleId };
@@ -2564,39 +3076,76 @@ app.get("/api/returns", async (_req, res, next) => {
     next(e);
   }
 });
-app.post("/api/returns", async (req, res, next) => {
+app.post("/api/returns", requireEmployeeSession, async (req, res, next) => {
   try {
-    const id = await transaction((client) => createReturn(client, req.body));
+    const id = await transaction(async (client) => {
+      const shift = await getOpenShiftForEmployee(client, req.employee.id, {
+        lock: true,
+      });
+      return createReturn(client, req.body, { shiftId: shift.id });
+    });
     const all = await fetchReturns();
     res.status(201).json(all.find((x) => x.returnId === id));
   } catch (e) {
     next(e);
   }
 });
-app.put("/api/returns/:returnId/settlement", async (req, res, next) => {
-  try {
-    const result = await pool.query(
-      "UPDATE returns SET settlement_status='completed' WHERE return_id=$1 RETURNING *",
-      [req.params.returnId],
-    );
-    if (!result.rowCount) throw httpError(404, "سجل المرتجع غير موجود.");
-    res.json(await serializeReturn(result.rows[0]));
-  } catch (e) {
-    next(e);
-  }
-});
-app.patch("/api/returns/:returnId/settlement", async (req, res, next) => {
-  try {
-    const result = await pool.query(
-      "UPDATE returns SET settlement_status='completed' WHERE return_id=$1 RETURNING *",
-      [req.params.returnId],
-    );
-    if (!result.rowCount) throw httpError(404, "سجل المرتجع غير موجود.");
-    res.json(await serializeReturn(result.rows[0]));
-  } catch (e) {
-    next(e);
-  }
-});
+app.put(
+  "/api/returns/:returnId/settlement",
+  requireEmployeeSession,
+  async (req, res, next) => {
+    try {
+      const row = await transaction(async (client) => {
+        const shift = await getOpenShiftForEmployee(client, req.employee.id, {
+          lock: true,
+        });
+        const found = await client.query(
+          "SELECT * FROM returns WHERE return_id=$1 FOR UPDATE",
+          [req.params.returnId],
+        );
+        if (!found.rowCount) throw httpError(404, "سجل المرتجع غير موجود.");
+        if (found.rows[0].settlement_status === "completed")
+          return found.rows[0];
+        const updated = await client.query(
+          "UPDATE returns SET settlement_status='completed', settlement_shift_id=$2 WHERE return_id=$1 RETURNING *",
+          [req.params.returnId, shift.id],
+        );
+        return updated.rows[0];
+      });
+      res.json(await serializeReturn(row));
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+app.patch(
+  "/api/returns/:returnId/settlement",
+  requireEmployeeSession,
+  async (req, res, next) => {
+    try {
+      const row = await transaction(async (client) => {
+        const shift = await getOpenShiftForEmployee(client, req.employee.id, {
+          lock: true,
+        });
+        const found = await client.query(
+          "SELECT * FROM returns WHERE return_id=$1 FOR UPDATE",
+          [req.params.returnId],
+        );
+        if (!found.rowCount) throw httpError(404, "سجل المرتجع غير موجود.");
+        if (found.rows[0].settlement_status === "completed")
+          return found.rows[0];
+        const updated = await client.query(
+          "UPDATE returns SET settlement_status='completed', settlement_shift_id=$2 WHERE return_id=$1 RETURNING *",
+          [req.params.returnId, shift.id],
+        );
+        return updated.rows[0];
+      });
+      res.json(await serializeReturn(row));
+    } catch (e) {
+      next(e);
+    }
+  },
+);
 
 app.get("/api/customers", async (req, res, next) => {
   try {
@@ -2953,11 +3502,11 @@ app.post("/api/import/localstorage", async (req, res, next) => {
 });
 // ---- Electronic wallets / InstaPay transfers ----
 const TRANSFER_COMMISSION_DEFAULTS = Object.freeze({
-  wallet_withdrawal: 0,
-  wallet_transfer: 0,
-  instapay_withdrawal: 0,
-  instapay_transfer: 0,
-  instapay_vodafone_transfer: 0,
+  wallet_withdrawal: Object.freeze({ value: 0, unit: "egp" }),
+  wallet_transfer: Object.freeze({ value: 0, unit: "egp" }),
+  instapay_withdrawal: Object.freeze({ value: 0, unit: "egp" }),
+  instapay_transfer: Object.freeze({ value: 0, unit: "egp" }),
+  instapay_vodafone_transfer: Object.freeze({ value: 0, unit: "egp" }),
 });
 
 function transferLineDto(row) {
@@ -2981,6 +3530,8 @@ function transferLineDto(row) {
     dailyRemaining: money(Math.max(0, dailyLimit - dailyUsed)),
     monthlyRemaining: money(Math.max(0, monthlyLimit - monthlyUsed)),
     balance: money(row.balance),
+    walletBalance: money(row.wallet_balance),
+    instapayBalance: money(row.instapay_balance),
     isActive: Boolean(row.is_active),
     createdAt: asNumber(row.created_at),
     updatedAt: asNumber(row.updated_at),
@@ -3043,7 +3594,13 @@ function validateTransferLineInput(body) {
   const lastFour = asText(body?.lastFour);
   const dailyLimit = money(asNumber(body?.dailyLimit, NaN));
   const monthlyLimit = money(asNumber(body?.monthlyLimit, NaN));
-  const balance = money(asNumber(body?.balance, NaN));
+  const legacyRaw = Number(body?.balance);
+  const legacyBalance = Number.isFinite(legacyRaw) ? money(legacyRaw) : 0;
+  const walletRaw = body?.walletBalance === undefined ? (supportsWallet ? legacyBalance : 0) : Number(body.walletBalance);
+  const instapayRaw = body?.instapayBalance === undefined ? (supportsInstapay && !supportsWallet ? legacyBalance : 0) : Number(body.instapayBalance);
+  const walletBalance = Number.isFinite(walletRaw) ? money(walletRaw) : NaN;
+  const instapayBalance = Number.isFinite(instapayRaw) ? money(instapayRaw) : NaN;
+  const balance = Number.isFinite(walletBalance) && Number.isFinite(instapayBalance) ? money(walletBalance + instapayBalance) : NaN;
 
   if (phoneDigits.length < 10 || phoneDigits.length > 15)
     throw httpError(400, "رقم الخط لازم يكون من 10 إلى 15 رقمًا.");
@@ -3056,11 +3613,7 @@ function validateTransferLineInput(body) {
     throw httpError(400, "اختار البنك الخاص بخط إنستا باي.");
   if (lastFour && !/^\d{4}$/.test(lastFour))
     throw httpError(400, "آخر أربع أرقام لازم تكون أرقامًا فقط.");
-  if (
-    ![dailyLimit, monthlyLimit, balance].every(
-      (n) => Number.isFinite(n) && n >= 0,
-    )
-  )
+  if (![dailyLimit, monthlyLimit, walletBalance, instapayBalance].every((n) => Number.isFinite(n) && n >= 0))
     throw httpError(400, "الليميت والرصيد لازم يكونوا أرقامًا موجبة أو صفرًا.");
 
   return {
@@ -3075,6 +3628,8 @@ function validateTransferLineInput(body) {
     dailyLimit,
     monthlyLimit,
     balance,
+    walletBalance,
+    instapayBalance,
   };
 }
 
@@ -3083,11 +3638,30 @@ async function readTransferCommissions(queryable = pool) {
     "SELECT value FROM app_settings WHERE key = 'transfer_commissions' LIMIT 1",
   );
   const stored = result.rows[0]?.value;
-  const values = { ...TRANSFER_COMMISSION_DEFAULTS };
+  const values = Object.fromEntries(
+    Object.entries(TRANSFER_COMMISSION_DEFAULTS).map(([key, fee]) => [
+      key,
+      { ...fee },
+    ]),
+  );
+
+  // القيم الرقمية القديمة تظل صالحة وتُعامل كمبالغ ثابتة بالجنيه.
   if (stored && typeof stored === "object" && !Array.isArray(stored)) {
     for (const key of Object.keys(values)) {
-      const value = Number(stored[key]);
-      if (Number.isFinite(value) && value >= 0) values[key] = money(value);
+      const raw = stored[key];
+      if (typeof raw === "number" || typeof raw === "string") {
+        const legacyValue = Number(raw);
+        if (Number.isFinite(legacyValue) && legacyValue >= 0)
+          values[key] = { value: money(legacyValue), unit: "egp" };
+        continue;
+      }
+      if (!raw || typeof raw !== "object" || Array.isArray(raw)) continue;
+      const value = Number(raw.value);
+      if (!Number.isFinite(value) || value < 0) continue;
+      values[key] = {
+        value: money(value),
+        unit: raw.unit === "percent" ? "percent" : "egp",
+      };
     }
   }
   return values;
@@ -3096,6 +3670,7 @@ async function readTransferCommissions(queryable = pool) {
 app.get("/api/transfer-lines", async (_req, res, next) => {
   try {
     await resetTransferLinePeriods();
+    await ensureTransferDailyOpeningBalances();
     const result = await pool.query(
       "SELECT * FROM transfer_lines ORDER BY is_active DESC, updated_at DESC, owner_name ASC",
     );
@@ -3113,10 +3688,10 @@ app.post("/api/transfer-lines", async (req, res, next) => {
     const result = await pool.query(
       `INSERT INTO transfer_lines
         (id,phone,phone_key,owner_name,wallet_type,bank_name,last_four,
-         supports_wallet,supports_instapay,daily_limit,monthly_limit,balance,
+         supports_wallet,supports_instapay,daily_limit,monthly_limit,balance,wallet_balance,instapay_balance,
          daily_used,monthly_used,daily_period,monthly_period,is_active,created_at,updated_at)
-       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,0,0,CURRENT_DATE,
-         date_trunc('month',CURRENT_DATE)::date,TRUE,$13,$13)
+       VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,0,0,CURRENT_DATE,
+         date_trunc('month',CURRENT_DATE)::date,TRUE,$15,$15)
        RETURNING *`,
       [
         id,
@@ -3131,6 +3706,8 @@ app.post("/api/transfer-lines", async (req, res, next) => {
         line.dailyLimit,
         line.monthlyLimit,
         line.balance,
+        line.walletBalance,
+        line.instapayBalance,
         now,
       ],
     );
@@ -3148,7 +3725,7 @@ app.put("/api/transfer-lines/:id", async (req, res, next) => {
       `UPDATE transfer_lines SET
          phone=$2, phone_key=$3, owner_name=$4, wallet_type=$5, bank_name=$6,
          last_four=$7, supports_wallet=$8, supports_instapay=$9, daily_limit=$10,
-         monthly_limit=$11, balance=$12, is_active=COALESCE($13,is_active), updated_at=$14
+         monthly_limit=$11, balance=$12, wallet_balance=$13, instapay_balance=$14, is_active=COALESCE($15,is_active), updated_at=$16
        WHERE id=$1 RETURNING *`,
       [
         asText(req.params.id),
@@ -3163,6 +3740,8 @@ app.put("/api/transfer-lines/:id", async (req, res, next) => {
         line.dailyLimit,
         line.monthlyLimit,
         line.balance,
+        line.walletBalance,
+        line.instapayBalance,
         typeof req.body?.isActive === "boolean" ? req.body.isActive : null,
         now,
       ],
@@ -3200,16 +3779,24 @@ app.put("/api/transfer-commissions", async (req, res, next) => {
     const input = req.body && typeof req.body === "object" ? req.body : {};
     const values = {};
     for (const key of Object.keys(TRANSFER_COMMISSION_DEFAULTS)) {
-      const value = Number(input[key]);
+      const raw = input[key];
+      // العملاء القدامى الذين يرسلون رقمًا فقط يظلون مدعومين.
+      const value =
+        typeof raw === "object" && raw !== null
+          ? Number(raw.value)
+          : Number(raw);
+      const unit = typeof raw === "object" && raw !== null ? raw.unit : "egp";
       if (!Number.isFinite(value) || value < 0)
-        throw httpError(400, "كل عمولة لازم تكون رقمًا موجبًا أو صفرًا.");
-      values[key] = money(value);
+        throw httpError(400, "قيمة كل عمولة لازم تكون رقمًا موجبًا أو صفرًا.");
+      if (unit !== "egp" && unit !== "percent")
+        throw httpError(400, "وحدة العمولة لازم تكون جنيه أو نسبة مئوية.");
+      if (unit === "percent" && value > 100)
+        throw httpError(400, "نسبة العمولة لازم تكون بين 0 و100 بالمئة.");
+      values[key] = { value: money(value), unit };
     }
     const now = nowMs();
     await pool.query(
-      `INSERT INTO app_settings(key,value,updated_at)
-       VALUES('transfer_commissions',$1::jsonb,$2)
-       ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at`,
+      "INSERT INTO app_settings(key,value,updated_at) VALUES('transfer_commissions',$1::jsonb,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value, updated_at=EXCLUDED.updated_at",
       [JSON.stringify(values), now],
     );
     res.json(values);
@@ -3218,7 +3805,415 @@ app.put("/api/transfer-commissions", async (req, res, next) => {
   }
 });
 
-app.post("/api/transfers", async (req, res, next) => {
+
+// Daily transfer reconciliation: opening balances, day movements, and expected transfer cash.
+async function getTransferBusinessDayBounds(queryable = pool) {
+  const result = await queryable.query(
+    "SELECT TO_CHAR(CURRENT_DATE, 'YYYY-MM-DD') AS business_date, (extract(epoch FROM (CURRENT_DATE::timestamp AT TIME ZONE 'Africa/Cairo')) * 1000)::BIGINT AS start_ms, (extract(epoch FROM ((CURRENT_DATE + 1)::timestamp AT TIME ZONE 'Africa/Cairo')) * 1000)::BIGINT AS end_ms",
+  );
+  const row = result.rows[0];
+  return {
+    businessDate: row.business_date,
+    startMs: String(row.start_ms),
+    endMs: String(row.end_ms),
+  };
+}
+
+async function ensureTransferDailyOpeningBalances(queryable = pool, suppliedBounds = null) {
+  const bounds = suppliedBounds || await getTransferBusinessDayBounds(queryable);
+  const result = await queryable.query(
+    `SELECT l.id, l.supports_wallet, l.supports_instapay, l.wallet_balance, l.instapay_balance, l.balance,
+       COALESCE(SUM(CASE WHEN t.service_type='wallet' THEN
+         CASE WHEN t.source_line_id=l.id THEN CASE WHEN t.operation_type='withdrawal' THEN t.amount ELSE -t.amount END
+              WHEN t.destination_line_id=l.id THEN t.amount ELSE 0 END
+         ELSE 0 END), 0) AS wallet_net,
+       COALESCE(SUM(CASE WHEN t.service_type='instapay' THEN
+         CASE WHEN t.source_line_id=l.id THEN CASE WHEN t.operation_type='withdrawal' THEN t.amount ELSE -t.amount END
+              WHEN t.destination_line_id=l.id THEN t.amount ELSE 0 END
+         ELSE 0 END), 0) AS instapay_net
+     FROM transfer_lines l
+     LEFT JOIN transfer_transactions t
+       ON (t.source_line_id=l.id OR t.destination_line_id=l.id)
+      AND t.created_at >= $1::BIGINT AND t.created_at < $2::BIGINT
+     GROUP BY l.id`,
+    [bounds.startMs, bounds.endMs],
+  );
+  const capturedAt = nowMs();
+  for (const row of result.rows) {
+    if (row.supports_wallet) {
+      const opening = money(asNumber(row.wallet_balance, asNumber(row.balance)) - asNumber(row.wallet_net));
+      await queryable.query(
+        `INSERT INTO transfer_daily_openings (business_date,line_id,service_type,opening_balance,captured_at)
+         VALUES ($1::date,$2,'wallet',$3,$4)
+         ON CONFLICT (business_date,line_id,service_type) DO NOTHING`,
+        [bounds.businessDate, row.id, opening, capturedAt],
+      );
+    }
+    if (row.supports_instapay) {
+      const opening = money(asNumber(row.instapay_balance, asNumber(row.balance)) - asNumber(row.instapay_net));
+      await queryable.query(
+        `INSERT INTO transfer_daily_openings (business_date,line_id,service_type,opening_balance,captured_at)
+         VALUES ($1::date,$2,'instapay',$3,$4)
+         ON CONFLICT (business_date,line_id,service_type) DO NOTHING`,
+        [bounds.businessDate, row.id, opening, capturedAt],
+      );
+    }
+  }
+  return bounds;
+}
+
+async function buildTransferDailyReconciliationReport(
+  queryable = pool,
+  canEditCashOpening = false,
+  includeTransactions = true,
+) {
+  const bounds = await getTransferBusinessDayBounds(queryable);
+  await ensureTransferDailyOpeningBalances(queryable, bounds);
+  const lineResult = await queryable.query(
+    `SELECT l.*, wo.opening_balance AS wallet_opening_balance,
+            io.opening_balance AS instapay_opening_balance
+     FROM transfer_lines l
+     LEFT JOIN transfer_daily_openings wo
+       ON wo.line_id=l.id AND wo.business_date=$1::date AND wo.service_type='wallet'
+     LEFT JOIN transfer_daily_openings io
+       ON io.line_id=l.id AND io.business_date=$1::date AND io.service_type='instapay'
+     ORDER BY l.is_active DESC, l.owner_name ASC, l.phone ASC`,
+    [bounds.businessDate],
+  );
+  const txResult = await queryable.query(
+    "SELECT * FROM transfer_transactions WHERE created_at >= $1::BIGINT AND created_at < $2::BIGINT ORDER BY created_at DESC",
+    [bounds.startMs, bounds.endMs],
+  );
+  const lines = lineResult.rows.map((row) => ({
+    id: row.id,
+    phone: row.phone,
+    ownerName: row.owner_name,
+    walletType: row.wallet_type || "",
+    bankName: row.bank_name || "",
+    lastFour: row.last_four || "",
+    isActive: Boolean(row.is_active),
+    supportsWallet: Boolean(row.supports_wallet),
+    supportsInstapay: Boolean(row.supports_instapay),
+    wallet: row.supports_wallet ? {
+      openingBalance: row.wallet_opening_balance == null ? null : money(row.wallet_opening_balance),
+      incoming: 0,
+      outgoing: 0,
+      expectedBalance: null,
+      currentBalance: money(row.wallet_balance),
+      variance: null,
+    } : null,
+    instapay: row.supports_instapay ? {
+      openingBalance: row.instapay_opening_balance == null ? null : money(row.instapay_opening_balance),
+      incoming: 0,
+      outgoing: 0,
+      expectedBalance: null,
+      currentBalance: money(row.instapay_balance),
+      variance: null,
+    } : null,
+  }));
+  const lineById = new Map(lines.map((line) => [line.id, line]));
+  for (const tx of txResult.rows) {
+    const amount = money(tx.amount);
+    const source = lineById.get(tx.source_line_id);
+    const sourceService = tx.service_type === "wallet" ? source?.wallet : source?.instapay;
+    if (sourceService) {
+      if (tx.operation_type === "withdrawal") sourceService.incoming = money(sourceService.incoming + amount);
+      else sourceService.outgoing = money(sourceService.outgoing + amount);
+    }
+    if (tx.destination_line_id) {
+      const destination = lineById.get(tx.destination_line_id);
+      const destinationService = tx.service_type === "wallet" ? destination?.wallet : destination?.instapay;
+      if (destinationService) destinationService.incoming = money(destinationService.incoming + amount);
+    }
+  }
+
+  for (const line of lines) {
+    for (const state of [line.wallet, line.instapay]) {
+      if (!state) continue;
+      if (state.openingBalance !== null) {
+        state.expectedBalance = money(state.openingBalance + state.incoming - state.outgoing);
+        state.variance = money(state.currentBalance - state.expectedBalance);
+      }
+    }
+  }
+  const summarize = (key) => {
+    const states = lines.map((line) => line[key]).filter(Boolean);
+    return {
+      openingTotal: money(states.reduce((sum, state) => sum + (state.openingBalance ?? 0), 0)),
+      incomingTotal: money(states.reduce((sum, state) => sum + state.incoming, 0)),
+      outgoingTotal: money(states.reduce((sum, state) => sum + state.outgoing, 0)),
+      expectedTotal: money(states.reduce((sum, state) => sum + (state.expectedBalance ?? 0), 0)),
+      currentTotal: money(states.reduce((sum, state) => sum + state.currentBalance, 0)),
+      varianceTotal: money(states.reduce((sum, state) => sum + (state.variance ?? 0), 0)),
+    };
+  };
+  return {
+    scope: "daily",
+    businessDate: bounds.businessDate,
+    walletSummary: summarize("wallet"),
+    instapaySummary: summarize("instapay"),
+    lines,
+    // Cash from transfer operations is now reconciled with sales / collections
+    // in each employee shift, not in this line-balance report.
+    transactions: includeTransactions ? txResult.rows.map(transferTransactionDto) : [],
+  };
+}
+
+function shiftTransferServiceState(openingBalance, currentBalance, present = true) {
+  if (!present) return null;
+  const opening = money(openingBalance ?? 0);
+  return {
+    openingBalance: opening,
+    incoming: 0,
+    outgoing: 0,
+    expectedBalance: opening,
+    currentBalance: currentBalance == null ? opening : money(currentBalance),
+    variance: currentBalance == null ? null : money(money(currentBalance) - opening),
+  };
+}
+
+function summarizeShiftTransferLines(lines, key) {
+  const states = lines.map((line) => line[key]).filter(Boolean);
+  return {
+    openingTotal: money(states.reduce((sum, state) => sum + (state.openingBalance ?? 0), 0)),
+    incomingTotal: money(states.reduce((sum, state) => sum + state.incoming, 0)),
+    outgoingTotal: money(states.reduce((sum, state) => sum + state.outgoing, 0)),
+    expectedTotal: money(states.reduce((sum, state) => sum + (state.expectedBalance ?? 0), 0)),
+    currentTotal: money(states.reduce((sum, state) => sum + state.currentBalance, 0)),
+    varianceTotal: money(states.reduce((sum, state) => sum + (state.variance ?? 0), 0)),
+  };
+}
+
+async function captureShiftTransferOpeningSnapshot(client, shift, estimateFromLedger = false) {
+  const existing = await client.query(
+    "SELECT snapshot FROM employee_shift_transfer_reconciliation_snapshots WHERE shift_id=$1 LIMIT 1",
+    [shift.id],
+  );
+  if (existing.rows[0]?.snapshot?.kind === "opening") return existing.rows[0].snapshot;
+
+  const lineResult = await client.query(
+    `SELECT id, phone, owner_name, wallet_type, bank_name, last_four, is_active,
+            supports_wallet, supports_instapay, wallet_balance, instapay_balance, balance
+       FROM transfer_lines
+      ORDER BY id ${estimateFromLedger ? "" : "FOR SHARE"}`,
+  );
+  const netByLine = new Map();
+  if (estimateFromLedger) {
+    // Recovery for a shift that was already open before this feature. Rebuild the
+    // most likely opening balance from the ledger; mark it estimated because manual
+    // balance edits cannot be reconstructed from transfer transactions alone.
+    const movementResult = await client.query(
+      `SELECT source_line_id, destination_line_id, service_type, operation_type, amount
+         FROM transfer_transactions WHERE created_at >= $1::BIGINT`,
+      [Number(shift.opened_at)],
+    );
+    for (const tx of movementResult.rows) {
+      const amount = money(tx.amount);
+      const sourceDelta = tx.operation_type === "withdrawal" ? amount : -amount;
+      const addDelta = (lineId, service, delta) => {
+        if (!lineId) return;
+        const key = `${lineId}:${service}`;
+        netByLine.set(key, money((netByLine.get(key) || 0) + delta));
+      };
+      addDelta(tx.source_line_id, tx.service_type, sourceDelta);
+      if (tx.destination_line_id) addDelta(tx.destination_line_id, tx.service_type, amount);
+    }
+  }
+
+  const capturedAt = nowMs();
+  const lines = lineResult.rows.map((row) => {
+    const walletCurrent = money(row.wallet_balance ?? (row.supports_wallet ? row.balance : 0));
+    const instaCurrent = money(row.instapay_balance ?? (row.supports_instapay && !row.supports_wallet ? row.balance : 0));
+    const walletOpening = estimateFromLedger
+      ? money(walletCurrent - (netByLine.get(`${row.id}:wallet`) || 0))
+      : walletCurrent;
+    const instapayOpening = estimateFromLedger
+      ? money(instaCurrent - (netByLine.get(`${row.id}:instapay`) || 0))
+      : instaCurrent;
+    return {
+      id: row.id,
+      phone: row.phone,
+      ownerName: row.owner_name || "",
+      walletType: row.wallet_type || "",
+      bankName: row.bank_name || "",
+      lastFour: row.last_four || "",
+      isActive: Boolean(row.is_active),
+      supportsWallet: Boolean(row.supports_wallet),
+      supportsInstapay: Boolean(row.supports_instapay),
+      wallet: row.supports_wallet ? shiftTransferServiceState(walletOpening, walletCurrent) : null,
+      instapay: row.supports_instapay ? shiftTransferServiceState(instapayOpening, instaCurrent) : null,
+    };
+  });
+  const snapshot = {
+    scope: "shift",
+    kind: "opening",
+    schemaVersion: 2,
+    shiftId: shift.id,
+    openedAt: Number(shift.opened_at),
+    capturedAt,
+    openingSnapshotEstimated: Boolean(estimateFromLedger),
+    walletSummary: summarizeShiftTransferLines(lines, "wallet"),
+    instapaySummary: summarizeShiftTransferLines(lines, "instapay"),
+    lines,
+    transactions: [],
+  };
+  await client.query(
+    `INSERT INTO employee_shift_transfer_reconciliation_snapshots(shift_id,snapshot,captured_at)
+     VALUES($1,$2::jsonb,$3)
+     ON CONFLICT (shift_id) DO UPDATE SET snapshot=EXCLUDED.snapshot,captured_at=EXCLUDED.captured_at`,
+    [shift.id, JSON.stringify(snapshot), capturedAt],
+  );
+  return snapshot;
+}
+
+async function buildShiftTransferReconciliation(client, shift, openingSnapshot) {
+  const [liveResult, transferResult] = await Promise.all([
+    client.query(
+      `SELECT id, phone, owner_name, wallet_type, bank_name, last_four, is_active,
+              supports_wallet, supports_instapay, wallet_balance, instapay_balance, balance
+         FROM transfer_lines`,
+    ),
+    client.query(
+      `SELECT id, reference_number, operation_type, service_type, source_line_id,
+              destination_line_id, source_phone_snapshot, source_owner_snapshot,
+              destination_phone_snapshot, recipient_phone, recipient_name, amount,
+              commission, transfer_cost, profit, transfer_to_vodafone, created_at
+         FROM transfer_transactions WHERE shift_id=$1 ORDER BY created_at ASC`,
+      [shift.id],
+    ),
+  ]);
+  const currentById = new Map(liveResult.rows.map((row) => [row.id, row]));
+  const lineById = new Map();
+  const lines = openingSnapshot.lines.map((base) => {
+    const current = currentById.get(base.id);
+    const line = {
+      ...base,
+      isActive: current ? Boolean(current.is_active) : base.isActive,
+      wallet: base.wallet ? {
+        ...base.wallet,
+        incoming: 0,
+        outgoing: 0,
+        currentBalance: current ? money(current.wallet_balance ?? current.balance ?? 0) : money(base.wallet.openingBalance ?? 0),
+      } : null,
+      instapay: base.instapay ? {
+        ...base.instapay,
+        incoming: 0,
+        outgoing: 0,
+        currentBalance: current ? money(current.instapay_balance ?? 0) : money(base.instapay.openingBalance ?? 0),
+      } : null,
+    };
+    lineById.set(line.id, line);
+    return line;
+  });
+  // Lines created after shift start appear with zero opening balance, so any initial
+  // seed balance is visible as a variance instead of being mistaken for shift activity.
+  for (const row of liveResult.rows) {
+    if (lineById.has(row.id)) continue;
+    const line = {
+      id: row.id,
+      phone: row.phone,
+      ownerName: row.owner_name || "",
+      walletType: row.wallet_type || "",
+      bankName: row.bank_name || "",
+      lastFour: row.last_four || "",
+      isActive: Boolean(row.is_active),
+      supportsWallet: Boolean(row.supports_wallet),
+      supportsInstapay: Boolean(row.supports_instapay),
+      wallet: row.supports_wallet ? shiftTransferServiceState(0, row.wallet_balance ?? row.balance ?? 0) : null,
+      instapay: row.supports_instapay ? shiftTransferServiceState(0, row.instapay_balance ?? 0) : null,
+    };
+    lines.push(line);
+    lineById.set(line.id, line);
+  }
+
+  for (const tx of transferResult.rows) {
+    const amount = money(tx.amount);
+    const source = lineById.get(tx.source_line_id);
+    const sourceState = tx.service_type === "wallet" ? source?.wallet : source?.instapay;
+    if (sourceState) {
+      if (tx.operation_type === "withdrawal") sourceState.incoming = money(sourceState.incoming + amount);
+      else sourceState.outgoing = money(sourceState.outgoing + amount);
+    }
+    if (tx.destination_line_id) {
+      const destination = lineById.get(tx.destination_line_id);
+      const destinationState = tx.service_type === "wallet" ? destination?.wallet : destination?.instapay;
+      if (destinationState) destinationState.incoming = money(destinationState.incoming + amount);
+    }
+  }
+
+  for (const line of lines) {
+    for (const state of [line.wallet, line.instapay]) {
+      if (!state) continue;
+      if (state.openingBalance != null) {
+        state.expectedBalance = money(state.openingBalance + state.incoming - state.outgoing);
+        state.variance = state.currentBalance == null ? null : money(state.currentBalance - state.expectedBalance);
+      }
+    }
+  }
+  return {
+    scope: "shift",
+    kind: "current",
+    schemaVersion: 2,
+    shiftId: shift.id,
+    openedAt: Number(shift.opened_at),
+    capturedAt: nowMs(),
+    openingSnapshotEstimated: Boolean(openingSnapshot.openingSnapshotEstimated),
+    walletSummary: summarizeShiftTransferLines(lines, "wallet"),
+    instapaySummary: summarizeShiftTransferLines(lines, "instapay"),
+    lines,
+    transactions: transferResult.rows.map(transferTransactionDto),
+  };
+}
+
+async function getShiftTransferReconciliation(client, shift) {
+  const saved = await client.query(
+    "SELECT snapshot FROM employee_shift_transfer_reconciliation_snapshots WHERE shift_id=$1 LIMIT 1",
+    [shift.id],
+  );
+  const snapshot = saved.rows[0]?.snapshot || null;
+  if (shift.status === "closed") {
+    // Only return snapshots that were actually captured for this shift. Earlier
+    // versions stored a daily snapshot, which must not be presented as shift history.
+    return snapshot?.kind === "final" ? snapshot : null;
+  }
+  const openingSnapshot = snapshot?.kind === "opening"
+    ? snapshot
+    : await captureShiftTransferOpeningSnapshot(client, shift, true);
+  return buildShiftTransferReconciliation(client, shift, openingSnapshot);
+}
+
+app.get("/api/transfer-reconciliation", async (req, res, next) => {
+  try {
+    const canEditCashOpening = ["owner", "manager", "accountant", "developer"].includes(req.employee?.role);
+    res.json(await buildTransferDailyReconciliationReport(pool, canEditCashOpening, true));
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.put("/api/transfer-reconciliation/cash-opening", async (req, res, next) => {
+  try {
+    if (!["owner", "manager", "accountant", "developer"].includes(req.employee?.role))
+      throw httpError(403, "تعديل رصيد بداية النقدية متاح للمالك أو الإدارة فقط.");
+    const openingCash = Number(req.body?.openingCash);
+    if (!Number.isFinite(openingCash) || openingCash < 0 || openingCash > 999999999)
+      throw httpError(400, "اكتب رصيد بداية النقدية رقمًا صحيحًا غير سالب.");
+    const bounds = await getTransferBusinessDayBounds(pool);
+    const result = await pool.query(
+      `INSERT INTO transfer_daily_cash_openings (business_date,opening_cash,updated_at,updated_by)
+       VALUES ($1::date,$2,$3,$4)
+       ON CONFLICT (business_date) DO UPDATE
+         SET opening_cash=EXCLUDED.opening_cash, updated_at=EXCLUDED.updated_at, updated_by=EXCLUDED.updated_by
+       RETURNING business_date,opening_cash,updated_at`,
+      [bounds.businessDate, money(openingCash), nowMs(), req.employee.id],
+    );
+    res.json({ ok: true, businessDate: bounds.businessDate, openingCash: money(result.rows[0].opening_cash) });
+  } catch (error) {
+    next(error);
+  }
+});
+
+app.post("/api/transfers", requireEmployeeSession, async (req, res, next) => {
   try {
     const operationType = validEnum(
       req.body?.operationType,
@@ -3277,6 +4272,10 @@ app.post("/api/transfers", async (req, res, next) => {
             : "instapay_transfer";
 
     const operation = await transaction(async (client) => {
+      await ensureTransferDailyOpeningBalances(client);
+      const shift = await getOpenShiftForEmployee(client, req.employee.id, {
+        lock: true,
+      });
       const lineIds = [
         ...new Set([
           sourceLineId,
@@ -3348,18 +4347,25 @@ app.post("/api/transfers", async (req, res, next) => {
           409,
           `العملية مرفوضة: المتبقي من الليميت الشهري ${monthlyRemaining.toFixed(2)} ج.م فقط.`,
         );
-      if (
-        operationType === "transfer" &&
-        asNumber(source.balance) + 0.001 < amount
-      )
-        throw httpError(
-          409,
-          `رصيد الخط غير كافٍ. الرصيد المتاح ${money(source.balance).toFixed(2)} ج.م.`,
-        );
+      const sourceServiceBalance = serviceType === "wallet" ? money(source.wallet_balance) : money(source.instapay_balance);
+      if (operationType === "transfer" && sourceServiceBalance + 0.001 < amount)
+        throw httpError(409, `رصيد ${serviceType === "wallet" ? "المحفظة" : "إنستا باي"} غير كافٍ. الرصيد المتاح ${sourceServiceBalance.toFixed(2)} ج.م.`);
 
       const commissions = await readTransferCommissions(client);
-      const commission = money(commissions[commissionType]);
-      const profit = money(commission - transferCost);
+      const commissionSetting = commissions[commissionType];
+      // Transfers between the shop's own lines are internal movements, not revenue.
+      const internalTransfer = Boolean(destination);
+      const commission = internalTransfer
+        ? 0
+        : money(
+            commissionSetting.unit === "percent"
+              ? (amount * commissionSetting.value) / 100
+              : commissionSetting.value,
+          );
+      const effectiveTransferCost = internalTransfer ? 0 : transferCost;
+      const profit = internalTransfer
+        ? 0
+        : money(commission - effectiveTransferCost);
       const id = newId("transfer-");
       const referenceNumber = `TR-${Date.now().toString(36).toUpperCase()}-${crypto.randomBytes(3).toString("hex").toUpperCase()}`;
       const destinationPhone = destination ? destination.phone : recipientPhone;
@@ -3368,16 +4374,18 @@ app.post("/api/transfers", async (req, res, next) => {
       await client.query(
         `UPDATE transfer_lines
            SET balance = CASE WHEN $2='withdrawal' THEN balance + $3 ELSE balance - $3 END,
+               wallet_balance = CASE WHEN $5='wallet' THEN CASE WHEN $2='withdrawal' THEN wallet_balance + $3 ELSE wallet_balance - $3 END ELSE wallet_balance END,
+               instapay_balance = CASE WHEN $5='instapay' THEN CASE WHEN $2='withdrawal' THEN instapay_balance + $3 ELSE instapay_balance - $3 END ELSE instapay_balance END,
                daily_used=daily_used+$3,
                monthly_used=monthly_used+$3,
                updated_at=$4
          WHERE id=$1`,
-        [sourceLineId, operationType, amount, now],
+        [sourceLineId, operationType, amount, now, serviceType],
       );
       if (destination) {
         await client.query(
-          "UPDATE transfer_lines SET balance=balance+$2, updated_at=$3 WHERE id=$1",
-          [destination.id, amount, now],
+          `UPDATE transfer_lines SET balance=balance+$2, wallet_balance=CASE WHEN $4='wallet' THEN wallet_balance+$2 ELSE wallet_balance END, instapay_balance=CASE WHEN $4='instapay' THEN instapay_balance+$2 ELSE instapay_balance END, updated_at=$3 WHERE id=$1`,
+          [destination.id, amount, now, serviceType],
         );
       }
 
@@ -3386,8 +4394,8 @@ app.post("/api/transfers", async (req, res, next) => {
           (id,reference_number,operation_type,service_type,commission_type,
            source_line_id,source_phone_snapshot,source_owner_snapshot,
            destination_line_id,destination_phone_snapshot,recipient_phone,recipient_name,
-           amount,commission,transfer_cost,profit,transfer_to_vodafone,created_at)
-         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
+           amount,commission,transfer_cost,profit,transfer_to_vodafone,created_at,shift_id)
+         VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19)
          RETURNING *`,
         [
           id,
@@ -3404,10 +4412,11 @@ app.post("/api/transfers", async (req, res, next) => {
           recipientName,
           amount,
           commission,
-          transferCost,
+          effectiveTransferCost,
           profit,
           transferToVodafone,
           now,
+          shift.id,
         ],
       );
       return transferTransactionDto(inserted.rows[0]);

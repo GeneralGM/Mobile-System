@@ -18,6 +18,8 @@ import {
   BadgeDollarSign,
   ReceiptText,
   HandCoins,
+  ArrowRightLeft,
+  ClockArrowUp,
 } from "lucide-react";
 
 type AppShellProps = {
@@ -32,14 +34,9 @@ const navigation = [
   { label: "الأقساط", to: "/installlments", icon: HandCoins },
   { label: "المرتجعات", to: "/returns", icon: RotateCcw },
   { label: "سجل المرتجعات", to: "/returns-history", icon: RotateCcw },
-] as const;
-
-const upcoming = [
-  { label: "الإكسسوارات", icon: Package },
-  { label: "العملاء والموردون", icon: Users },
-  { label: "الأقساط والتحصيل", icon: CreditCard },
-  { label: "التقارير", icon: ChartNoAxesCombined },
-  { label: "الإعدادات", icon: Settings },
+  { label: "تحويلات لحظية", to: "/transfers", icon: ArrowRightLeft },
+  { label: "سجل التحويلات", to: "/transfer-history", icon: ClockArrowUp },
+  { label: "الشيفتات", to: "/shifts", icon: ClockArrowUp },
 ] as const;
 
 const pageTitles: Record<string, string> = {
@@ -61,7 +58,10 @@ export function AppShell({ children }: AppShellProps) {
   const currentTitle = pageTitles[pathname] || "إدارة محل الموبايلات";
 
   return (
-    <div dir="rtl" className="min-h-screen bg-[var(--background)] text-slate-900">
+    <div
+      dir="rtl"
+      className="min-h-screen bg-[var(--background)] text-slate-900"
+    >
       {mobileMenuOpen && (
         <button
           type="button"
@@ -83,7 +83,9 @@ export function AppShell({ children }: AppShellProps) {
             </div>
             <div>
               <h1 className="text-base font-bold tracking-tight">BMO Mobile</h1>
-              <p className="mt-0.5 text-xs text-slate-600">إدارة محل الموبايلات</p>
+              <p className="mt-0.5 text-xs text-slate-600">
+                إدارة محل الموبايلات
+              </p>
             </div>
           </div>
 
@@ -127,28 +129,6 @@ export function AppShell({ children }: AppShellProps) {
           <p className="mb-2 mt-5 px-3 text-[11px] font-bold text-slate-500">
             قيد التجهيز
           </p>
-          <div className="space-y-0.5">
-            {upcoming.map((item) => {
-              const Icon = item.icon;
-              return (
-                <button
-                  key={item.label}
-                  type="button"
-                  onClick={() => {
-                    setNotice(`صفحة «${item.label}» غير متاحة بعد.`);
-                    setMobileMenuOpen(false);
-                  }}
-                  className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-right text-sm font-medium text-slate-500 hover:bg-slate-50 hover:text-slate-800"
-                >
-                  <Icon size={18} />
-                  <span className="flex-1">{item.label}</span>
-                  <span className="rounded bg-slate-100 px-1.5 py-0.5 text-[10px] font-bold text-slate-600">
-                    قريبًا
-                  </span>
-                </button>
-              );
-            })}
-          </div>
         </nav>
 
         <div className="border-t border-slate-200 p-4">
